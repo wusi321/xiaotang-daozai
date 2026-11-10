@@ -249,6 +249,8 @@ impl App {
             let attachment = self.chat.attachments[index].clone();
             let (x, y) = (38.0 + index as f32 * 62.0, 152.0);
             c.fill(x, y, 60.0, 28.0, 6.0, theme::CARD);
+            let chip = c.hit(x, y, 60.0, 28.0, ("chat-detach", index)).on_hover_text(format!("点击移除：{}", attachment.path.display()));
+            if chip.hovered() { c.fill(x, y, 60.0, 28.0, 6.0, Color32::from_white_alpha(16)); }
             match self.thumbnail(c.ui.ctx(), &attachment) {
                 Some(texture) => {
                     c.painter.image(texture.id(), c.rect(x + 2.0, y + 4.0, 20.0, 20.0), Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
@@ -259,11 +261,9 @@ impl App {
                     c.centered_text(x + 12.0, y + 14.0, label, 9.0, W::Semibold, color, H::Center);
                 }
             }
-            c.text(x + 25.0, y + 12.0, &c.fit(&attachment.name(), 7.5, W::Regular, 32.0), 7.5, W::Regular, Color32::from_gray(225), H::Left);
+            c.text(x + 25.0, y + 12.0, &c.fit(&attachment.name(), 7.5, W::Regular, 31.0), 7.5, W::Regular, Color32::from_gray(225), H::Left);
             c.text(x + 25.0, y + 23.0, attachment.kind.label(), 7.0, W::Regular, theme::DIM, H::Left);
-            let close = c.hit(x + 47.0, y + 1.0, 12.0, 12.0, ("chat-detach", index)).on_hover_text(format!("移除 {}", attachment.path.display()));
-            c.text(x + 53.0, y + 9.0, "×", 9.0, W::Regular, if close.hovered() { theme::WHITE } else { theme::GRAY }, H::Center);
-            if close.clicked() { remove = Some(index); }
+            if chip.clicked() { remove = Some(index); }
         }
         if let Some(index) = remove {
             self.chat.attachments.remove(index);

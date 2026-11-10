@@ -2073,6 +2073,32 @@ fn preview_chat_page(){
 }
 
 #[test]
+#[ignore="按需导出带附件的对话页画面"]
+fn preview_chat_attachments(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_CHAT_PREVIEW_DIR").expect("需指定预览目录"));
+    std::fs::create_dir_all(dest.join("files")).unwrap();
+    let image_path=dest.join("files").join("cover.png");
+    image::RgbaImage::from_pixel(96,96,image::Rgba([104,84,196,255])).save(&image_path).unwrap();
+    let note=dest.join("files").join("会议记录.md");
+    std::fs::write(&note,"- 周五前完成附件设计\n- 下周联调").unwrap();
+    let attachments=vec![crate::chat::Attachment::of(note.clone()),crate::chat::Attachment::of(image_path.clone())];
+    let mut user=crate::chat::Message::user(format!("看看这两份材料，给个结论{}",crate::chat::path_summary(&attachments)));
+    user.attachments=attachments.clone();
+    let mut reply=crate::chat::Message::assistant();
+    reply.text="附件一是一份会议记录，重点是周五前完成附件设计；附件二是一张纯色封面，暂时没有信息量。\n\n建议：先确认附件设计的时间点，再决定要不要把封面换成实际截图。".into();
+    reply.outcome=crate::chat::Outcome::Ok;
+    let mut h=H::new();let mut r=feature_raster();
+    h.app.chat.config.slot=Some("preview".into());
+    h.app.chat.config.model="deepseek-chat".into();
+    h.app.chat.config.read_attachments=true;
+    h.app.chat.conversations=vec![crate::chat::Conversation{title:"两份材料".into(),messages:vec![user,reply]}];
+    h.app.chat.attachments=attachments;
+    h.app.show_page(crate::app::CHAT_PAGE);
+    shoot_feature(&mut h,&mut r,&dest,"chat-attachments",90,Some(H::local(210.0,18.0)),"2026-11-10");
+}
+
+#[test]
 fn battery_module_hides_power_in_collapsed_and_expanded_headers() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for expanded in [false,true] {
