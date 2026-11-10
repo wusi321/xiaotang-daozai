@@ -174,8 +174,11 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
     for _ in 0..2 {
         crate::model::Settings::load().save();
         let saved=std::fs::read_to_string(directory.join("settings.txt")).unwrap();
-        for line in legacy.lines(){assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");}
+        // 新增页面会让这两个键各多一位，其余键必须原样保留。
+        for line in legacy.lines().filter(|line|!line.starts_with("visible_pages=")&&!line.starts_with("page_order=")){assert!(saved.lines().any(|value|value==line),"升级保存不能改变旧设置：{line}");}
     }
+    assert_eq!(upgraded.visible_pages,[true,false,true,true,true,true,true,true,true],"旧页面开关保留，新增的对话页默认开启");
+    assert_eq!(upgraded.page_order,[5,2,0,1,3,4,6,7,8],"旧顺序保留，对话页追加在最后");
     std::fs::write(directory.join("mail-accounts.json"),br#"[{"email":"OldUser@qq.com","provider":"qq","enabled":true},{"email":"old@icloud.com","provider":"icloud","enabled":false}]"#).unwrap();
     let accounts=crate::mail::load_accounts();
     assert_eq!(accounts.len(),2);assert!(accounts.iter().all(|account|account.custom.is_none()));
@@ -581,7 +584,7 @@ impl H {
             focused: true,
             ..Default::default()
         };
-        self.app.filter_todo_input(&mut raw);
+        self.app.filter_island_input(&mut raw);
         let env = Env {
             t: self.t,
             clock: "09:41:00".into(),
@@ -1556,7 +1559,7 @@ fn wheel_navigation_reaches_every_page_in_both_directions(){
     h.app.shelf.items.clear();h.app.todos.items.clear();
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     h.hover(H::local(210.0,18.0),0.3);
-    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,0]),(40.0,[7,6,5,4,3,2,1,0])] {
+    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,8,0]),(40.0,[8,7,6,5,4,3,2,1,0])] {
         for page in pages {
             h.wheel(delta);
             assert_eq!(h.app.page,page,"滚轮翻页不能被空的置物架或待办卡住");
@@ -1636,9 +1639,9 @@ fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
 }
 
 #[test]
-fn navigation_wraps_between_eight_pages_and_notification_settings_remain_accessible() {
+fn navigation_wraps_between_all_pages_and_notification_settings_remain_accessible() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,7);
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,8);
     h.hover(H::local(300.0,60.0),0.8);h.click(H::local(398.0,68.0));assert_eq!(h.app.page,0);
     h.app.open_settings_category(3);assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,6);
 }
@@ -1877,7 +1880,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
 fn page_visibility_is_saved_and_sets_the_starting_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    assert_eq!(h.app.settings.visible_pages,[true;8]);
+    assert_eq!(h.app.settings.visible_pages,[true;9]);
     assert!(h.app.settings.show_battery);
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
@@ -1885,17 +1888,131 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.save();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true]);
+    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,true]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),1);
     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
     assert!(!restarted.settings.show_battery);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false,false]);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true],"旧版页面开关应保留，并开启新增的日程页");
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,true],"旧版页面开关应保留，并开启新增的日程页与对话页");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true;8]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true;9]);
+}
+
+#[test]
+fn chat_page_is_last_and_refuses_to_send_without_a_key() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    assert_eq!(h.app.settings.page_order[8],8);
+    assert!(h.app.settings.visible_pages[8],"默认应开启对话页");
+    h.app.show_page(crate::app::CHAT_PAGE);
+    h.hover(H::local(300.0,60.0),1.0);
+    assert_eq!(h.app.page(),crate::app::CHAT_PAGE);
+    h.app.chat.draft="你好".into();
+    h.cmds.clear();
+    h.app.chat_send(&mut h.cmds);
+    assert!(h.cmds.is_empty(),"没有密钥不能发请求");
+    assert!(h.app.chat.status.contains("API Key"));
+    assert!(h.app.chat.conversation().messages.is_empty(),"失败不应留下半截消息");
+    assert_eq!(h.app.chat.draft,"你好","失败时草稿要保留");
+}
+
+#[test]
+fn chat_send_streams_reasoning_and_answer_into_one_bubble() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.chat.config.slot=Some("test-slot".into());
+    h.app.show_page(crate::app::CHAT_PAGE);
+    h.hover(H::local(300.0,60.0),1.0);
+    h.app.chat.draft="帮我看看".into();
+    h.cmds.clear();
+    h.click(H::local(374.0,211.0));
+    assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::ChatSend(_))),"点发送按钮应产生请求");
+    let messages=h.app.chat.conversation().messages.clone();
+    assert_eq!(messages.len(),2);
+    assert_eq!(messages[0].text,"帮我看看");
+    assert!(h.app.chat.is_streaming());
+    h.app.chat_event(crate::chat::Event::Delta{reasoning:true,text:"先想一想".into()});
+    h.app.chat_event(crate::chat::Event::Delta{reasoning:false,text:"好的".into()});
+    h.app.chat_event(crate::chat::Event::Delta{reasoning:false,text:"，我看看".into()});
+    assert_eq!(h.app.chat.conversation().messages[1].text,"好的，我看看");
+    assert_eq!(h.app.chat.conversation().messages[1].reasoning,"先想一想");
+    h.app.chat_event(crate::chat::Event::Done{ms:1500});
+    assert!(!h.app.chat.is_streaming());
+    assert_eq!(h.app.chat.conversation().messages[1].outcome,crate::chat::Outcome::Ok);
+    h.hover(H::local(300.0,60.0),0.6);
+    for _ in 0..20 {h.frame(vec![]);}
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="好的，我看看")),"回答应出现在气泡里");
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains("思考 4 字"))),"思考过程应折叠成一行摘要");
+}
+
+#[test]
+fn chat_escape_keeps_the_draft_and_ten_seconds_rule_collapses() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.show_page(crate::app::CHAT_PAGE);
+    h.hover(H::local(300.0,60.0),1.0);
+    h.app.chat.draft="还没发出去的草稿".into();
+    h.app.chat.input_focused=true;
+    h.frame(vec![egui::Event::Key{key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
+    assert!(!h.app.chat.input_focused,"Esc 只让输入框失焦");
+    assert_eq!(h.app.chat.draft,"还没发出去的草稿");
+    assert!(h.app.open);
+    h.cursor=None;
+    for _ in 0..(60*12) {h.frame(vec![]);}
+    assert!(h.app.open,"强制展开的 4 秒过后，离开 10 秒内还应收着，方便回来继续");
+    for _ in 0..(60*4) {h.frame(vec![]);}
+    assert!(!h.app.open,"离开 10 秒后自动收起");
+}
+
+#[test]
+fn chat_ime_commit_enter_never_sends_the_message() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.chat.config.slot=Some("test-slot".into());
+    h.app.show_page(crate::app::CHAT_PAGE);
+    h.hover(H::local(300.0,60.0),1.0);
+    h.app.chat.draft="ni".into();
+    h.app.chat.input_focused=true;
+    h.frame(vec![egui::Event::Ime(egui::ImeEvent::Enabled)]);
+    h.cmds.clear();
+    h.frame(vec![
+        egui::Event::Ime(egui::ImeEvent::Commit("你".into())),
+        egui::Event::Key{key:egui::Key::Enter,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()},
+    ]);
+    assert!(h.cmds.iter().all(|cmd|!matches!(cmd,crate::app::Cmd::ChatSend(_))),"选词回车不能直接发送");
+}
+
+#[test]
+#[ignore="按需导出 AI 对话页的实际画面"]
+fn preview_chat_page(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_CHAT_PREVIEW_DIR").expect("需指定预览目录"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let today="2026-11-10";
+    let conversation=||{
+        let mut reply=crate::chat::Message::assistant();
+        reply.reasoning="缓存像桌边的小抽屉：常用的东西放进去，拿的时候不用起身去仓库。抽屉里的东西会过期，所以需要「失效」策略。".into();
+        reply.text="缓存像桌边的小抽屉：常用的东西放进去，拿的时候不用起身去仓库。\n\n但它会过期，于是有了「失效」：到点清掉、写入时替换，或者容量满了先扔最久没用的。".into();
+        reply.outcome=crate::chat::Outcome::Ok;
+        crate::chat::Conversation{
+            title:"缓存是什么".into(),
+            messages:vec![
+                crate::chat::Message::user("用一个比喻解释缓存，顺便说说它为什么会失效"),
+                reply,
+            ],
+        }
+    };
+    let mut h=H::new();let mut r=feature_raster();
+    h.app.chat.config.slot=Some("preview".into());
+    h.app.chat.config.model="deepseek-chat".into();
+    h.app.chat.conversations=vec![conversation()];
+    h.app.show_page(crate::app::CHAT_PAGE);
+    shoot_feature(&mut h,&mut r,&dest,"chat-answer",90,Some(H::local(210.0,18.0)),today);
+    h.app.chat.reasoning_open=true;
+    shoot_feature(&mut h,&mut r,&dest,"chat-thinking-open",36,Some(H::local(210.0,18.0)),today);
+    let mut h=H::new();let mut r=feature_raster();
+    h.app.chat.config.slot=Some("preview".into());
+    h.app.show_page(crate::app::CHAT_PAGE);
+    shoot_feature(&mut h,&mut r,&dest,"chat-empty",90,Some(H::local(210.0,18.0)),today);
 }
 
 #[test]
@@ -1935,7 +2052,7 @@ fn battery_module_can_disable_only_the_power_warning() {
 fn page_visibility_skips_hidden_pages_in_every_navigation_control() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,8] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [2,5,0] {
         h.click(H::local(398.0,68.0));
@@ -1964,7 +2081,7 @@ fn page_visibility_moves_away_from_hidden_page_and_keeps_one_page() {
     h.app.set_page_visible(4,false);
     assert_eq!(h.app.page,0);
     assert!(!h.app.is_editing());
-    for page in [0,1,3,5,6,7] {h.app.set_page_visible(page,false);}
+    for page in [0,1,3,5,6,7,8] {h.app.set_page_visible(page,false);}
     assert_eq!(h.app.page,2);
     h.app.set_page_visible(2,false);
     assert!(h.app.settings.visible_pages[2],"不能关闭最后一个页面");
@@ -4323,13 +4440,13 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
 fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.settings.page_order=[5,2,0,1,3,4,6,7];
+    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8];
     h.app.settings.save();
     let settings=crate::model::Settings::load();
-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7]);
+    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),5);
-    for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,8] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [5,2,0] {
         h.click(H::local(398.0,68.0));
@@ -4340,9 +4457,11 @@ fn page_order_persists_and_controls_navigation() {
     assert_eq!(h.app.page,2);
     h.app.set_page_visible(2,false);
     assert_eq!(h.app.page,5);
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"page_order=5,2,0,1,3,4,6,7\n").unwrap();
+    assert_eq!(crate::model::Settings::load().page_order,[5,2,0,1,3,4,6,7,8],"旧版 8 项顺序应保留，并把对话页放在最后");
     for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","invalid"] {
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7]);
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8]);
     }
 }
 
@@ -4369,9 +4488,9 @@ fn page_order_drag_applies_on_release_and_saves() {
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8]);
     draw(&mut h,vec![button(to,false)]);
-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8]);
     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
 }
 
@@ -4814,7 +4933,7 @@ fn compact_canvas_preserves_panel_and_notice_pixels(){
         }
         rgba
     }
-    for page in std::iter::once(None).chain((0..8).map(Some)) {
+    for page in std::iter::once(None).chain((0..9).map(Some)) {
         for notice in [false,true] {
             assert_eq!(draw(1280.0,page,notice),draw(960.0,page,notice),"缩减透明余量不能改变页面 {page:?} 和通知 {notice} 的像素");
         }
@@ -4904,7 +5023,7 @@ fn compact_font_atlas_preserves_panel_and_notice_pixels(){
         }
         rgba
     }
-    for page in std::iter::once(None).chain((0..8).map(Some)) {
+    for page in std::iter::once(None).chain((0..9).map(Some)) {
         for notice in [false,true] {
             let reference=draw(16384,page,notice);
             for limit in [4096,2048] {let other=draw(limit,page,notice);
@@ -5693,7 +5812,7 @@ fn memory_profile_long_listening_session(){
     let idle=crate::smtc::NowPlaying::default();
     for _ in 0..30 {run(&mut h,&idle);}
     report("启动后",&h);
-    for page in 0..8 {h.app.show_page(page);for _ in 0..20 {run(&mut h,&idle);}}
+    for page in 0..9 {h.app.show_page(page);for _ in 0..20 {run(&mut h,&idle);}}
     report("浏览8个页面后",&h);
     for song in 0..songs {
         // 常用字约 3000 个：每首歌 40 句、每句 8–12 字，从中随机取，接近真实歌词的用字分布。
@@ -6102,7 +6221,7 @@ fn wheel_short_lists_turn_pages(){
     h.app.calendar.view.day=day;h.app.calendar.view.month=crate::calendar::month_start(day);h.app.calendar.view.loaded=Some(h.app.calendar.view.month);
     for (count,ended,all_day) in [(0,false,false),(1,false,false),(5,false,false),(8,true,false),(4,false,true)]{
         h.app.calendar.view.events=(0..count).map(|i|crate::mail::Meeting{all_day,title:format!("日程 {i}"),start:if ended{start-7200}else{start+i*60},end:Some(if ended{start-3600}else{start+3600}),at:String::new(),uid:format!("wheel-{i}")}).collect();
-        for (delta,page) in [(-40.0,0),(40.0,6)]{
+        for (delta,page) in [(-40.0,8),(40.0,6)]{
             h.app.show_page(7);h.hover(H::local(300.0,160.0),0.5);h.wheel(delta);
             assert_eq!(h.app.page,page,"日历可见列表未溢出应翻页，条数 {count}");
         }

@@ -24,6 +24,9 @@ pub const PW: f32 = 419.0; // 展开面板宽
 pub const PH: f32 = 140.0; // 展开面板高
 pub(crate) const CALENDAR_PAGE: usize = 7;
 pub(crate) const CALENDAR_H: f32 = 216.0;
+/// AI 对话页固定在最后（索引 8），新增页面不改动既有页号。
+pub(crate) const CHAT_PAGE: usize = 8;
+pub(crate) const CHAT_H: f32 = 248.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
 pub(crate) const HUD_W: f32 = 260.0;
@@ -49,7 +52,7 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
+pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "AI 对话"];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -183,6 +186,14 @@ pub enum Cmd {
     CalendarForget,
     /// 选择 .ics 文件导入本机日程。
     CalendarImport,
+    /// v0.7：把一轮对话交给外壳，由它读取凭据并开始流式请求。
+    ChatSend(crate::chat::ChatRequest),
+    /// 打断正在生成的回答。
+    ChatCancel,
+    /// 设置页试连：Key 只在内存里传给工作线程，成功后才存入凭据管理器。
+    ChatTest(crate::chat::Config, String),
+    /// 删除已保存的密钥（槽位由界面传入，删除后界面自己清空引用）。
+    ChatForget(String),
 }
 
 /// 毛玻璃皮肤下原生窗口区域的组成部分（相对 `win` 左上角，逻辑点）。
@@ -606,7 +617,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 8],
+    dots: [Spring; 9],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -650,8 +661,8 @@ pub struct App {
     pub(crate) editing: Option<usize>,
     pub(crate) buf: String,
     pub(crate) todo_input_focused: bool,
-    todo_ime_active: bool,
-    todo_ime_frame: bool,
+    ime_active: bool,
+    ime_frame: bool,
     pub(crate) todo_pop: Spring,
 
     // 音乐
@@ -727,6 +738,7 @@ pub struct App {
     /// v0.5.6：日历（CalDAV）配置、未来 24 小时事件与设置表单。
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
+    pub(crate) chat: crate::chat_ui::State,
     pub(crate) updates: crate::updates::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
@@ -796,8 +808,8 @@ impl App {
             reset_spin: Spring::new(0.0, 160.0, 0.82),
             adding: false,
             todo_input_focused: false,
-            todo_ime_active: false,
-            todo_ime_frame: false,
+            ime_active: false,
+            ime_frame: false,
             editing: None,
             buf: String::new(),
             todo_pop: Spring::new(0.0, 500.0, 0.45),
@@ -830,6 +842,7 @@ impl App {
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
+            chat: crate::chat_ui::State::load(),
             updates: Default::default(),
             resident: Default::default(), resident_power:(None,false),
         }
@@ -1276,7 +1289,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8][page];
+            self.settings_tab=[1,2,3,5,4,7,11,8,12][page];
             self.open_settings();
             return;
         }
@@ -1322,28 +1335,36 @@ impl App {
     }
 
     pub fn is_editing(&self) -> bool {
-        self.adding || self.editing.is_some() || self.todo_choosing || self.task_dialog.is_some() || self.calendar.draft.is_some() || self.focus_editing
+        self.adding || self.editing.is_some() || self.todo_choosing || self.task_dialog.is_some() || self.calendar.draft.is_some() || self.focus_editing || self.chat.input_focused
     }
 
-    pub fn filter_todo_input(&mut self,input:&mut egui::RawInput) {
-        self.todo_ime_frame=false;
-        if !self.adding && self.editing.is_none(){self.todo_ime_active=false;return;}
-        self.todo_ime_frame=self.todo_ime_active || input.events.iter().any(|event|matches!(event,egui::Event::Ime(egui::ImeEvent::Enabled|egui::ImeEvent::Preedit(_)|egui::ImeEvent::Commit(_))));
+    /// 岛内所有真实文本框（待办、任务、日程、AI 对话）共用一套输入法保护。
+    fn island_input_active(&self) -> bool {
+        self.adding || self.editing.is_some() || self.task_dialog.is_some() || self.calendar.draft.is_some() || self.chat.input_focused
+    }
+
+    pub fn filter_island_input(&mut self,input:&mut egui::RawInput) {
+        self.ime_frame=false;
+        if !self.island_input_active(){self.ime_active=false;return;}
+        self.ime_frame=self.ime_active || input.events.iter().any(|event|matches!(event,egui::Event::Ime(egui::ImeEvent::Enabled|egui::ImeEvent::Preedit(_)|egui::ImeEvent::Commit(_))));
         for event in &input.events {
             match event {
-                egui::Event::Ime(egui::ImeEvent::Enabled|egui::ImeEvent::Preedit(_))=>self.todo_ime_active=true,
-                egui::Event::Ime(egui::ImeEvent::Commit(_)|egui::ImeEvent::Disabled)=>self.todo_ime_active=false,
+                egui::Event::Ime(egui::ImeEvent::Enabled|egui::ImeEvent::Preedit(_))=>self.ime_active=true,
+                egui::Event::Ime(egui::ImeEvent::Commit(_)|egui::ImeEvent::Disabled)=>self.ime_active=false,
                 _=>{},
             }
         }
-        // 首帧和结束帧的按键、失焦仍属于组合输入，不能透传给待办编辑。
-        if self.todo_ime_frame {input.events.retain(|event|!matches!(event,egui::Event::Key{key:egui::Key::Backspace|egui::Key::Delete|egui::Key::Enter|egui::Key::Escape|egui::Key::ArrowLeft|egui::Key::ArrowRight|egui::Key::ArrowUp|egui::Key::ArrowDown,..}));}
+        // 首帧和结束帧的按键、失焦仍属于组合输入，不能透传给岛内编辑。
+        if self.ime_frame {input.events.retain(|event|!matches!(event,egui::Event::Key{key:egui::Key::Backspace|egui::Key::Delete|egui::Key::Enter|egui::Key::Escape|egui::Key::ArrowLeft|egui::Key::ArrowRight|egui::Key::ArrowUp|egui::Key::ArrowDown,..}));}
     }
 
     pub fn foreground_changed(&mut self) {
-        if self.todo_ime_frame {return;}
+        if self.ime_frame {return;}
         self.hover_lock=true;
         if self.adding && self.buf.trim().is_empty(){self.cancel_edit();}
+        // 切到别的程序：对话输入框失焦，但保留草稿与正在生成的回答。
+        self.chat.input_focused=false;
+        self.chat.focus_requested=false;
     }
 
     /// 带过渡地切到某页。`dir` > 0 表示内容从右侧进入。
@@ -1381,8 +1402,11 @@ impl App {
         self.calendar.draft=None;
         self.buf.clear();
         self.todo_input_focused=false;
-        self.todo_ime_active=false;
-        self.todo_ime_frame=false;
+        self.ime_active=false;
+        self.ime_frame=false;
+        // 对话只收起输入焦点，草稿、消息与正在生成的回答都保留。
+        self.chat.input_focused=false;
+        self.chat.focus_requested=false;
     }
 
     fn island_lyrics_active(&self)->bool {
@@ -1483,7 +1507,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==CHAT_PAGE {CHAT_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------
@@ -1614,7 +1638,8 @@ impl App {
                 let cursor=env.cursor.unwrap()-self.content_origin(win).to_vec2();
                 let mail_reading=self.page==5 && self.mail.open_uid.is_some();
                 let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
-                if mail_reading || mail_list {self.wheel_delta=0.0;}
+                let chat_body=self.page==CHAT_PAGE && Rect::from_min_max(Pos2::new(36.0,32.0),Pos2::new(383.0,182.0)).contains(cursor);
+                if mail_reading || mail_list || chat_body {self.wheel_delta=0.0;}
                 else {
                     // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
                     if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
@@ -1652,7 +1677,7 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
+        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open && self.page != CHAT_PAGE);
         self.morph(want, inside, env.t, dt);
         self.update_pet(env, cx);
 
@@ -1804,6 +1829,9 @@ impl App {
         }else{None};
         if (self.adding||self.editing.is_some()) && reveal > 0.9 && self.page == 4 && self.page_e() > 0.25 {
             self.input_field(ui, origin, &mut cmds);
+        }
+        if self.page == CHAT_PAGE && !self.chat.show_history && reveal > 0.9 && self.page_e() > 0.25 {
+            self.chat_inputs(ui, origin, &mut cmds);
         }
 
         if self.task_dialog.is_some() && reveal>0.9 {self.task_editor_inputs(ui,origin,&mut cmds);}
@@ -2174,6 +2202,12 @@ impl App {
         }
     }
 
+    /// 鼠标离开后多久收起：对话页统一给 10 秒，方便离开一下再回来继续问；
+    /// 生成中同样不打断，收起后回答继续在后台到达。
+    fn leave_delay(&self) -> f64 {
+        if self.page == CHAT_PAGE { 10.0 } else { LEAVE_DELAY }
+    }
+
     /// 悬停状态机：意图缓冲 → 弹簧展开 → 离开延迟 → 临界阻尼收起；全程可打断。
     fn morph(&mut self, want: bool, inside: bool, t: f64, dt: f32) {
         let (bw, bh) = self.base_size();
@@ -2204,7 +2238,7 @@ impl App {
             self.hover_since = None;
             if self.open {
                 let since = *self.leave_since.get_or_insert(t);
-                if t - since >= LEAVE_DELAY {
+                if t - since >= self.leave_delay() {
                     self.open = false;
                     self.leave_since = None;
                     self.w.tune(CLOSE.0, CLOSE.1);
@@ -2387,7 +2421,7 @@ impl App {
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8][self.page];self.open_settings();}
+        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8,12][self.page];self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
@@ -2429,6 +2463,7 @@ impl App {
             4 => ("待办", "清单", theme::GREEN),
             5 => ("邮箱", "", theme::CYAN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
+            CHAT_PAGE => ("AI", "对话", theme::SOFT_GREEN),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -2486,6 +2521,7 @@ impl App {
             4 => self.page_todo(c, env, cmds),
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
+            CHAT_PAGE => self.page_chat(c,env,cmds),
             CALENDAR_PAGE => self.page_calendar(c,env),
             _ => self.page_settings(c),
         }
@@ -2782,7 +2818,7 @@ impl App {
         let first_focus=!self.todo_input_focused;
         self.buf=buf;
         let lost_window=ui.input(|i|i.events.iter().any(|event|matches!(event,egui::Event::WindowFocused(false))));
-        if !first_focus && !self.todo_ime_frame && self.adding && self.buf.trim().is_empty() && (resp.clicked_elsewhere() || lost_window) {
+        if !first_focus && !self.ime_frame && self.adding && self.buf.trim().is_empty() && (resp.clicked_elsewhere() || lost_window) {
             resp.surrender_focus();
             self.cancel_edit();
             return;

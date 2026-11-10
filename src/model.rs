@@ -1,4 +1,4 @@
-﻿//! 持久化与状态模型。
+//! 持久化与状态模型。
 //!
 //! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
 //! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
@@ -198,8 +198,8 @@ pub struct Settings {
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 8],
-    pub page_order: [usize; 8],
+    pub visible_pages: [bool; 9],
+    pub page_order: [usize; 9],
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
@@ -242,7 +242,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
     }
 }
 
@@ -297,15 +297,19 @@ impl Settings {
                 }
                 "page_order" => {
                     if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
                             s.page_order.copy_from_slice(&order);
+                        } else if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                            // 旧版顺序：保留原相对次序，新增的 AI 对话页放在最后。
+                            for (slot,page) in s.page_order.iter_mut().zip(order) {*slot=page;}
+                            s.page_order[8]=8;
                         }
                     }
                 }
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
-                "visible_pages" if (6..=8).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
                 }

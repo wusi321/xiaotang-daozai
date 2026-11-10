@@ -15,6 +15,8 @@ pub(crate) enum PetState {
     Music,
     Worried,
     Focused,
+    /// AI 正在生成回答：眼睛看向左上，像在思考。
+    Thinking,
     Dozing,
     Sleeping,
 }
@@ -297,6 +299,12 @@ impl Pet {
                 eyes[1] = Eye { spread: 0.6, tilt: 0.7, y: 1.0, ..Eye::open(1.8) };
             },
             PetState::Focused => { eyes = [Eye::open(1.8); 2]; look = [gaze[0] * 0.2, 0.0]; y = 0.0; },
+            PetState::Thinking => {
+                eyes[0] = Eye { height: 3.2, spread: 0.2, curve: 0.7, y: -1.2, tilt: -0.3 };
+                eyes[1] = Eye { height: 3.6, spread: 0.2, curve: 0.7, y: -1.0, tilt: -0.15 };
+                look = [-1.2, -1.6];
+                y = -0.7 + (t as f32 * 2.1).sin() * 0.3;
+            },
             PetState::Dozing => { eyes = [Eye::open(0.6); 2]; y = 1.0; look = [0.0; 2]; },
             PetState::Sleeping => { eyes = [Eye::arc(2.4, 1.0); 2]; y = 0.8 + (t as f32 * 1.2).sin() * 0.4; look = [0.0; 2]; },
         }
@@ -350,6 +358,14 @@ impl Pet {
             PetState::Worried => {
                 c.fill(cx+17.0,8.0,1.6,4.2,0.8,theme::YELLOW);
                 c.circle(cx+17.8,14.5,0.9,theme::YELLOW);
+            },
+            PetState::Thinking => {
+                // 右上角三个脉动的小点，和「正在思考」的状态行呼应。
+                let phase = (t as f32 * 2.4).sin();
+                for (index, dx) in [13.0f32, 18.5, 24.0].into_iter().enumerate() {
+                    let lift = (phase + index as f32 * 1.1).sin() * 0.9;
+                    c.circle(cx+dx, 9.0-lift, 1.1, Color32::from_rgb(150,160,200));
+                }
             },
             _ => {},
         }

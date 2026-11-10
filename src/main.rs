@@ -76,6 +76,8 @@ struct Shell {
     quota: daozai::quota::Service,
     quota_sig: Option<(bool,Vec<daozai::quota::Account>)>,
     quota_at: PollClock,
+    /// v0.7：AI 对话的后台线程（流式生成与试连）。
+    chat: daozai::chat::Service,
 }
 
 impl Shell {
@@ -167,6 +169,7 @@ impl Shell {
             cal: daozai::calendar::Service::start(),
             cal_sig: (Vec::new(), true),
             quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
+            chat: daozai::chat::Service::start(cc.egui_ctx.clone()),
         }
     }
 
@@ -263,7 +266,7 @@ impl Shell {
 
 impl eframe::App for Shell {
     fn raw_input_hook(&mut self,_ctx:&egui::Context,input:&mut egui::RawInput) {
-        if input.viewport_id==egui::ViewportId::ROOT {self.app.filter_todo_input(input);}
+        if input.viewport_id==egui::ViewportId::ROOT {self.app.filter_island_input(input);}
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -471,6 +474,7 @@ impl eframe::App for Shell {
             }
             while let Some(ev)=self.quota.try_recv(self.app.quota_config()){self.app.quota_event(ev);}
         }
+        while let Some(ev)=self.chat.try_recv(){self.app.chat_event(ev);}
         let mut out = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT))
@@ -595,6 +599,20 @@ impl eframe::App for Shell {
                     self.cal.configure(configs.clone(),self.app.settings.calendar_auto_sync);
                     self.cal_sig=(configs,self.app.settings.calendar_auto_sync);
                 },
+                Cmd::ChatSend(request)=>{
+                    match request.config.slot.clone() {
+                        Some(slot)=>match daozai::chat::load_key(&slot) {
+                            Ok(key)=>{if let Err(error)=self.chat.send(&key,request){self.app.chat_event(daozai::chat::Event::Error(error));}},
+                            Err(error)=>self.app.chat_event(daozai::chat::Event::Error(error)),
+                        },
+                        None=>self.app.chat_event(daozai::chat::Event::Error("还没有保存 API Key，请到设置里连接".into())),
+                    }
+                },
+                Cmd::ChatCancel=>self.chat.cancel(),
+                Cmd::ChatTest(config,key)=>{
+                    if let Err(error)=self.chat.test(config,key){self.app.chat_event(daozai::chat::Event::Test(Err(error)));}
+                },
+                Cmd::ChatForget(slot)=>daozai::chat::forget_key(&slot),
                 Cmd::Focus => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
             }
         }

@@ -172,6 +172,8 @@ impl App {
             state
         } else if self.pet.waking_until > self.t {
             PetState::Waking
+        } else if self.chat.streaming.is_some() {
+            PetState::Thinking
         } else if self.pomo.running && self.pomo.phase == Phase::Focus {
             PetState::Focused
         } else if self.pet.worried {
@@ -628,7 +630,7 @@ mod tests {
 
     #[test]
     fn settings_groups_keep_every_page_reachable() {
-        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度"];
+        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 对话与额度", "AI 对话与额度"];
         for (tab, expected) in groups.iter().enumerate() {
             let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,start,end)| (*start..=*end).contains(&tab)).collect();
             assert_eq!(matches.len(), 1, "页面 {tab} 必须且只能属于一个分组");
@@ -1050,7 +1052,7 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
 }
 const SETTINGS_GROUPS: [(&str,usize,usize);8] = [
     ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3),
-    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度",11,11), ("关于",9,9),
+    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 对话与额度",11,12), ("关于",9,9),
 ];
 
 impl App {
@@ -1129,8 +1131,8 @@ impl App {
                     }
                 }
                 ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
-                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度"];
-                ui.label(egui::RichText::new(titles[self.settings_tab.min(11)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","AI 对话"];
+                ui.label(egui::RichText::new(titles[self.settings_tab.min(12)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
                 if let Some((_,start,end))=SETTINGS_GROUPS.iter().find(|(_,start,end)|(*start..=*end).contains(&self.settings_tab)) {
                     if start!=end {
                         ui.add_space(7.0);
@@ -1153,6 +1155,7 @@ impl App {
                     // 右侧给滚动条留出空隙，卡片和开关不会被它压住。
                     ui.set_width((ui.available_width()-12.0).max(240.0));
                     match self.settings_tab {
+                    12=>self.chat_settings(ui),
                     11=>self.quota_settings(ui),
                     10=>{
                         ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
@@ -1166,7 +1169,7 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","接入 AI 密钥与对话"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
