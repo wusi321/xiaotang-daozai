@@ -5,9 +5,6 @@ use crate::paint::{self, Card, H};
 use crate::theme::{self, W};
 use eframe::egui::{self, Color32, Pos2, Rect};
 
-/// 消息区（面板局部坐标）。app.rs 的滚轮命中判断使用同一组数字。
-pub(crate) fn list_area() -> Rect { Rect::from_min_size(Pos2::new(36.0, 32.0), egui::vec2(347.0, 150.0)) }
-
 /// 一轮正在生成的回答。
 pub(crate) struct Streaming { pub started: f64, pub chars: usize, pub reasoning: bool }
 
@@ -24,6 +21,9 @@ pub(crate) struct State {
     pub status_error: bool,
     pub show_history: bool,
     pub reasoning_open: bool,
+    /// 待发送的附件：只保存路径，图片缩略图按需解码并缓存。
+    pub attachments: Vec<chat::Attachment>,
+    pub thumbs: std::collections::HashMap<std::path::PathBuf, Option<egui::TextureHandle>>,
     pub key_input: String,
     pub testing: bool,
     pub note: String,
@@ -43,6 +43,8 @@ impl Default for State {
             status_error: false,
             show_history: false,
             reasoning_open: false,
+            attachments: Vec::new(),
+            thumbs: Default::default(),
             key_input: String::new(),
             testing: false,
             note: String::new(),
@@ -62,6 +64,32 @@ fn layout_text(ctx: &egui::Context, text: &str, size: f32, weight: W, color: Col
     let mut job = egui::text::LayoutJob::simple(text.to_owned(), theme::font(size, weight), color, wrap.max(24.0));
     job.wrap.break_anywhere = true;
     ctx.fonts(|fonts| fonts.layout_job(job))
+}
+
+/// 整段文本都是存在的本机文件路径时返回路径（每行一个，支持引号和 file:///）。
+fn paths_in(text: &str) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_matches('"').trim_matches('\'');
+        if line.is_empty() { continue; }
+        let line = match line.strip_prefix("file:///") {
+            Some(rest) => std::path::PathBuf::from(rest.replace('/', "\\")),
+            None => std::path::PathBuf::from(line),
+        };
+        if !line.is_file() { return Vec::new(); }
+        paths.push(line);
+        if paths.len() >= chat::MAX_ATTACHMENTS { break; }
+    }
+    paths
+}
+
+/// 图片附件的小缩略图；解码失败就退回类型角标，不影响发送。
+fn load_thumbnail(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::TextureHandle> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > 8 * 1024 * 1024 { return None; }
+    let image = image::open(path).ok()?.thumbnail(64, 64).to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    Some(ctx.load_texture(format!("chat-thumb-{}", path.display()), egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()), egui::TextureOptions::LINEAR))
 }
 
 /// 消息列表：贴底跟随，用户上滚后保持位置。返回被点击的「思考」折叠行。
@@ -142,14 +170,20 @@ impl App {
         }
 
         if self.chat.show_history { return; }
+        self.draw_chat_attachments(c);
         let (status, error) = self.chat_status();
-        if !status.is_empty() {
+        if self.drag_hot {
+            c.text(36.0, 190.0, "松开即可添加为附件（只记录路径）", 8.5, W::Regular, theme::BLUE, H::Left);
+        } else if !status.is_empty() {
             c.text(36.0, 190.0, &c.fit(&status, 8.5, W::Regular, 288.0), 8.5, W::Regular, if error { theme::RED } else { theme::GRAY }, H::Left);
         }
 
         // 输入条：背景与「点这里开始输入」的感应区；真正的文本框在 chat_inputs 里叠在上面。
         c.fill(36.0, 196.0, 347.0, 30.0, 9.0, theme::BTN);
-        let focus = c.hit(38.0, 197.0, 320.0, 28.0, "chat-focus");
+        let clip = c.hit(38.0, 199.0, 22.0, 24.0, "chat-attach").on_hover_text("添加图片或文件（也可拖入、粘贴本机路径）");
+        c.text(49.0, 216.0, "＋", 15.0, W::Regular, if clip.hovered() { theme::WHITE } else { theme::GRAY }, H::Center);
+        if clip.clicked() { cmds.push(Cmd::ChatAttach); }
+        let focus = c.hit(62.0, 197.0, 296.0, 28.0, "chat-focus");
         if focus.clicked() { self.chat.focus_requested = true; }
         let button = c.hit(362.0, 199.0, 24.0, 24.0, "chat-send").on_hover_text(if self.chat.is_streaming() { "停止生成" } else { "发送（回车）" });
         let (hover, press) = c.hover_t(&button);
@@ -198,12 +232,86 @@ impl App {
         let index = self.chat.index();
         let live = c.live;
         let reasoning_open = self.chat.reasoning_open;
-        let area = c.rect(list_area().left(), list_area().top(), list_area().width(), list_area().height());
+        let height = if self.chat.attachments.is_empty() { 150.0 } else { 118.0 };
+        let area = c.rect(36.0, 32.0, 347.0, height);
         let toggle = {
             let messages = &self.chat.conversations[index].messages;
             draw_rows(c, area, messages, reasoning_open, live, index)
         };
         if toggle.is_some() { self.chat.reasoning_open = !self.chat.reasoning_open; }
+    }
+
+    /// 附件条：只显示本机路径的缩略图/类型，并提供一个「允许读取内容」的开关。
+    fn draw_chat_attachments(&mut self, c: &Card) {
+        if self.chat.attachments.is_empty() { return; }
+        let mut remove = None;
+        for index in 0..self.chat.attachments.len().min(chat::MAX_ATTACHMENTS) {
+            let attachment = self.chat.attachments[index].clone();
+            let (x, y) = (38.0 + index as f32 * 62.0, 152.0);
+            c.fill(x, y, 60.0, 28.0, 6.0, theme::CARD);
+            match self.thumbnail(c.ui.ctx(), &attachment) {
+                Some(texture) => {
+                    c.painter.image(texture.id(), c.rect(x + 2.0, y + 4.0, 20.0, 20.0), Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+                }
+                None => {
+                    c.fill(x + 2.0, y + 4.0, 20.0, 20.0, 4.0, Color32::from_gray(46));
+                    let (label, color) = if attachment.kind == chat::AttachmentKind::Image { ("图", theme::SOFT_GREEN) } else { ("文", theme::GRAY) };
+                    c.centered_text(x + 12.0, y + 14.0, label, 9.0, W::Semibold, color, H::Center);
+                }
+            }
+            c.text(x + 25.0, y + 12.0, &c.fit(&attachment.name(), 7.5, W::Regular, 32.0), 7.5, W::Regular, Color32::from_gray(225), H::Left);
+            c.text(x + 25.0, y + 23.0, attachment.kind.label(), 7.0, W::Regular, theme::DIM, H::Left);
+            let close = c.hit(x + 47.0, y + 1.0, 12.0, 12.0, ("chat-detach", index)).on_hover_text(format!("移除 {}", attachment.path.display()));
+            c.text(x + 53.0, y + 9.0, "×", 9.0, W::Regular, if close.hovered() { theme::WHITE } else { theme::GRAY }, H::Center);
+            if close.clicked() { remove = Some(index); }
+        }
+        if let Some(index) = remove {
+            self.chat.attachments.remove(index);
+            self.chat.thumbs.clear();
+        }
+        let on = self.chat.config.read_attachments;
+        let toggle = c.hit(356.0, 155.0, 22.0, 22.0, "chat-read-attachments")
+            .on_hover_text(if on { "发送时会读取附件内容（图片 Base64、文本内联）；点击改为只发送路径" } else { "只发送路径；点击允许岛仔读取图片与文本内容" });
+        c.circle(367.0, 166.0, 10.0, if on { Color32::from_rgb(38, 84, 138) } else { Color32::from_gray(52) });
+        c.centered_text(367.0, 166.0, "读", 8.5, W::Semibold, if on { theme::WHITE } else { theme::GRAY }, H::Center);
+        if toggle.clicked() {
+            self.chat.config.read_attachments = !on;
+            self.chat.config.save();
+            self.chat.status = if self.chat.config.read_attachments { "发送时会读取附件内容".into() } else { "改为只发送附件路径".into() };
+            self.chat.status_error = false;
+        }
+    }
+
+    fn thumbnail(&mut self, ctx: &egui::Context, attachment: &chat::Attachment) -> Option<egui::TextureHandle> {
+        if attachment.kind != chat::AttachmentKind::Image { return None; }
+        if let Some(cached) = self.chat.thumbs.get(&attachment.path) { return cached.clone(); }
+        let texture = load_thumbnail(ctx, &attachment.path);
+        self.chat.thumbs.insert(attachment.path.clone(), texture.clone());
+        texture
+    }
+
+    /// 加附件：只接受真实文件，按路径去重，最多 5 个。
+    pub fn chat_attach(&mut self, files: Vec<std::path::PathBuf>) {
+        for path in files {
+            if self.chat.attachments.len() >= chat::MAX_ATTACHMENTS { break; }
+            if !path.is_file() { continue; }
+            if self.chat.attachments.iter().any(|attachment| attachment.path == path) { continue; }
+            self.chat.attachments.push(chat::Attachment::of(path));
+        }
+        if !self.chat.attachments.is_empty() {
+            self.chat.status = format!("{} 个附件 · {}", self.chat.attachments.len(), if self.chat.config.read_attachments { "发送时读取内容" } else { "只发送路径" });
+            self.chat.status_error = false;
+        }
+    }
+
+    /// 整段输入都是存在的本机路径时，转成附件而不是发出去。
+    fn attach_paths_from_text(&mut self, text: &str) -> bool {
+        let paths = paths_in(text);
+        if paths.is_empty() { return false; }
+        self.chat_attach(paths);
+        self.chat.draft.clear();
+        self.chat.input_focused = true;
+        true
     }
 
     fn draw_chat_history(&mut self, c: &Card) {
@@ -271,19 +379,27 @@ impl App {
     pub(crate) fn chat_send(&mut self, cmds: &mut Vec<Cmd>) {
         if self.chat.is_streaming() { return; }
         let text = self.chat.draft.trim().to_string();
-        if text.is_empty() { return; }
+        if text.is_empty() && self.chat.attachments.is_empty() { return; }
         if self.chat.config.slot.is_none() {
             self.chat.status = "还没有保存 API Key：请到 设置 → AI 对话 里连接".into();
             self.chat.status_error = true;
             return;
         }
+        let attachments = std::mem::take(&mut self.chat.attachments);
+        let body_text = if text.is_empty() { "请看看这些附件。".to_string() } else { text.clone() };
+        let body_text = format!("{}{}", body_text, chat::path_summary(&attachments));
         let conversation = self.chat.conversation_mut();
-        if conversation.title.is_empty() { conversation.title = chat::Conversation::title_of(&text); }
-        conversation.messages.push(Message::user(text));
+        if conversation.title.is_empty() { conversation.title = chat::Conversation::title_of(if text.is_empty() { "附件" } else { text.as_str() }); }
+        conversation.messages.push(Message::user_with(body_text, attachments));
         conversation.messages.push(Message::assistant());
         let messages = conversation.messages.clone();
-        let request = chat::ChatRequest { config: self.chat.config.clone(), messages };
+        let request = chat::ChatRequest {
+            config: self.chat.config.clone(),
+            messages,
+            read_attachments: self.chat.config.read_attachments,
+        };
         self.chat.draft.clear();
+        self.chat.thumbs.clear();
         self.chat.status.clear();
         self.chat.status_error = false;
         self.chat.reasoning_open = false;
@@ -355,9 +471,9 @@ impl App {
 
     /// 真正的文本框：只覆盖输入条内部，位于「点这里聚焦」的感应区之上。
     pub(crate) fn chat_inputs(&mut self, ui: &mut egui::Ui, origin: Pos2, cmds: &mut Vec<Cmd>) {
-        let rect = Rect::from_min_size(origin + egui::vec2(44.0, 201.0), egui::vec2(298.0, 19.0));
+        let rect = Rect::from_min_size(origin + egui::vec2(68.0, 201.0), egui::vec2(272.0, 19.0));
         let mut draft = std::mem::take(&mut self.chat.draft);
-        let hint = if self.chat.config.slot.is_some() { "问点什么，回车发送" } else { "先到设置里填写 API Key" };
+        let hint = if self.chat.config.slot.is_some() { "问点什么，回车发送；可拖入或粘贴路径" } else { "先到设置里填写 API Key" };
         let te = egui::TextEdit::singleline(&mut draft)
             .id(egui::Id::new("chat-input"))
             .frame(false)
@@ -382,9 +498,25 @@ impl App {
         if !self.chat.input_focused && resp.has_focus() { resp.surrender_focus(); }
         let lost_window = ui.input(|i| i.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))));
         if lost_window { self.chat.input_focused = false; }
+        // 粘贴进来的内容如果整段都是本机路径，直接转成附件，不当作消息发出。
+        if self.chat.input_focused {
+            let pasted: Vec<String> = ui.input(|i| i.events.iter().filter_map(|event| match event {
+                egui::Event::Paste(text) => Some(text.clone()),
+                _ => None,
+            }).collect());
+            for text in pasted {
+                if self.chat.draft.trim() == text.trim() && self.attach_paths_from_text(&text) {
+                    resp.request_focus();
+                    break;
+                }
+            }
+        }
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
         if enter && self.chat.input_focused {
-            self.chat_send(cmds);
+            let text = self.chat.draft.trim().to_string();
+            if !self.attach_paths_from_text(&text) {
+                self.chat_send(cmds);
+            }
             resp.request_focus();
             self.chat.input_focused = true;
         } else if resp.lost_focus() && !enter {
@@ -455,6 +587,12 @@ impl App {
         });
         crate::extras::settings_label(ui, "对话");
         crate::extras::settings_card(ui, |ui| {
+            let mut read = self.chat.config.read_attachments;
+            if ui.checkbox(&mut read, "允许读取附件内容（图片按 Base64、文本内联）").changed() {
+                self.chat.config.read_attachments = read;
+                self.chat.config.save();
+            }
+            ui.label(egui::RichText::new("关闭时只把附件的本机路径告诉模型；开启后每次发送才读取一次，不缓存内容。").size(10.5));
             ui.label(egui::RichText::new("系统提示词").size(11.0));
             ui.add(egui::TextEdit::multiline(&mut self.chat.config.system).desired_rows(3).desired_width(ui.available_width()));
             ui.horizontal(|ui| {

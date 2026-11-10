@@ -1982,6 +1982,63 @@ fn chat_ime_commit_enter_never_sends_the_message() {
 }
 
 #[test]
+fn chat_a_pasted_path_becomes_an_attachment_instead_of_a_message() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.chat.config.slot=Some("test-slot".into());
+    h.app.show_page(crate::app::CHAT_PAGE);
+    h.hover(H::local(300.0,60.0),1.0);
+    let directory=crate::model::config_dir();std::fs::create_dir_all(&directory).unwrap();
+    let file=directory.join("chat-path.txt");std::fs::write(&file,"你好").unwrap();
+    h.app.chat.draft=file.display().to_string();
+    h.app.chat.input_focused=true;
+    h.cmds.clear();
+    h.frame(vec![egui::Event::Key{key:egui::Key::Enter,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
+    assert!(h.cmds.iter().all(|cmd|!matches!(cmd,crate::app::Cmd::ChatSend(_))),"整段是路径时不应发送消息");
+    assert_eq!(h.app.chat.attachments.len(),1,"粘贴的本机路径应变成附件");
+    assert_eq!(h.app.chat.attachments[0].kind,crate::chat::AttachmentKind::Text);
+    assert!(h.app.chat.draft.is_empty());
+    std::fs::remove_file(&file).ok();
+}
+
+#[test]
+fn chat_sends_attachment_paths_and_honours_the_read_switch() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.chat.config.slot=Some("test-slot".into());
+    h.app.show_page(crate::app::CHAT_PAGE);
+    h.hover(H::local(300.0,60.0),1.0);
+    let directory=crate::model::config_dir();std::fs::create_dir_all(&directory).unwrap();
+    let file=directory.join("chat-attach.txt");std::fs::write(&file,"hello").unwrap();
+    h.app.chat.draft="看看".into();
+    h.app.chat_attach(vec![file.clone()]);
+    assert_eq!(h.app.chat.attachments.len(),1);
+    h.app.chat.config.read_attachments=true;
+    h.cmds.clear();
+    h.click(H::local(374.0,211.0));
+    let request=h.cmds.iter().find_map(|cmd|match cmd{crate::app::Cmd::ChatSend(request)=>Some(request.clone()),_=>None}).expect("应发出对话请求");
+    assert!(request.read_attachments,"开关打开时应带上读取标记");
+    let user=&request.messages[0];
+    assert!(user.text.contains("看看"));
+    assert!(user.text.contains(&file.display().to_string()),"消息里要带附件路径");
+    assert_eq!(user.attachments.len(),1);
+    assert!(h.app.chat.attachments.is_empty(),"发送后应清空待发附件");
+    std::fs::remove_file(&file).ok();
+}
+
+#[test]
+fn chat_folds_immediately_when_attention_leaves() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.show_page(crate::app::CHAT_PAGE);
+    h.hover(H::local(300.0,60.0),1.0);
+    h.app.chat.draft="还没发出去".into();
+    assert!(h.app.open);
+    h.app.foreground_changed();
+    assert!(!h.app.open,"切到别的程序应立即卷折，不再等 10 秒");
+    h.frame(vec![]);
+    assert!(!h.app.open,"强制展开的剩余时间不能把岛重新打开");
+    assert_eq!(h.app.chat.draft,"还没发出去","卷折不能丢掉草稿");
+}
+
+#[test]
 #[ignore="按需导出 AI 对话页的实际画面"]
 fn preview_chat_page(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());

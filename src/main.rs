@@ -613,6 +613,12 @@ impl eframe::App for Shell {
                     if let Err(error)=self.chat.test(config,key){self.app.chat_event(daozai::chat::Event::Test(Err(error)));}
                 },
                 Cmd::ChatForget(slot)=>daozai::chat::forget_key(&slot),
+                Cmd::ChatAttach=>{
+                    #[cfg(windows)] match daozai::system::pick_files_for("选择要添加的图片或文件",true) {
+                        Ok(files)=>if !files.is_empty(){self.app.chat_attach(files);},
+                        Err(error)=>self.app.say(format!("无法选择文件：{}",error.code())),
+                    }
+                },
                 Cmd::Focus => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
             }
         }

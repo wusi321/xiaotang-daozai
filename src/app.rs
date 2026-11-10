@@ -194,6 +194,8 @@ pub enum Cmd {
     ChatTest(crate::chat::Config, String),
     /// 删除已保存的密钥（槽位由界面传入，删除后界面自己清空引用）。
     ChatForget(String),
+    /// 选择附件（图片或文件）加入对话。
+    ChatAttach,
 }
 
 /// 毛玻璃皮肤下原生窗口区域的组成部分（相对 `win` 左上角，逻辑点）。
@@ -1365,6 +1367,9 @@ impl App {
         // 切到别的程序：对话输入框失焦，但保留草稿与正在生成的回答。
         self.chat.input_focused=false;
         self.chat.focus_requested=false;
+        // 对话页注意力离开就立即卷折；其它页面保留原来的短暂延迟，
+        // 这样待办里未提交的草稿不会被一次切窗立刻清掉。
+        if self.page == CHAT_PAGE { self.collapse_now(); }
     }
 
     /// 带过渡地切到某页。`dir` > 0 表示内容从右侧进入。
@@ -1586,18 +1591,24 @@ impl App {
         let dock = self.dock();
 
         // ---------- 输入：拖放 ----------
+        // 对话页拖进来的文件作为附件（只记路径），其余页面仍进置物架。
+        let chat_drop = self.page == CHAT_PAGE;
         let (hovering_files, dropped) = ctx.input(|i| {
             (
-                self.settings.visible_pages[3] && !i.raw.hovered_files.is_empty(),
+                (self.settings.visible_pages[3] || chat_drop) && !i.raw.hovered_files.is_empty(),
                 i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>(),
             )
         });
-        if !dropped.is_empty() && self.settings.visible_pages[3] {
-            self.on_drop(dropped);
-            self.show_page(3);
+        if !dropped.is_empty() {
+            if chat_drop {
+                self.chat_attach(dropped);
+            } else if self.settings.visible_pages[3] {
+                self.on_drop(dropped);
+                self.show_page(3);
+            }
         } else if hovering_files && !self.drag_hot {
             self.drag_hot = true;
-            if self.page != 3 {
+            if self.page != 3 && !chat_drop {
                 self.drag_saved = Some(self.page);
                 self.go(3, if self.page < 3 { 1.0 } else { -1.0 });
             }
@@ -1923,7 +1934,7 @@ impl App {
             glass: glass_region,
             hit: rel(if side {self.side_hit_rect(win,self.progress())} else {self.hit_rect(cx, top, self.progress())}),
             notice_hit:notice_shape.into_iter().chain(notice_details).chain(messenger_rect).chain(self.shelf_menu_rect).reduce(|a,b|a.union(b)).map(rel),
-            file_drop_zone:self.settings.visible_pages[3].then(||rel(if side {self.island_rect(win,PW,self.expanded_height())} else {Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0))})),
+            file_drop_zone:(self.settings.visible_pages[3] || self.page==CHAT_PAGE).then(||rel(if side || self.page==CHAT_PAGE {self.island_rect(win,PW,self.expanded_height())} else {Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0))})),
             expanded: self.open,
             editing: self.is_editing(),
             animating,
@@ -2206,6 +2217,22 @@ impl App {
     /// 生成中同样不打断，收起后回答继续在后台到达。
     fn leave_delay(&self) -> f64 {
         if self.page == CHAT_PAGE { 10.0 } else { LEAVE_DELAY }
+    }
+
+    /// 注意力已经离开（切到别的程序）：立即卷折，不再等 10 秒。
+    pub(crate) fn collapse_now(&mut self) {
+        if !self.open { return; }
+        let (bw, bh) = self.base_size();
+        self.open = false;
+        self.forced_open_until = 0.0;
+        self.hover_since = None;
+        self.leave_since = None;
+        self.w.tune(CLOSE.0, CLOSE.1);
+        self.h.tune(CLOSE.0, CLOSE.1);
+        self.w.target = bw;
+        self.h.target = bh;
+        self.cancel_edit();
+        self.confirm_clear = None;
     }
 
     /// 悬停状态机：意图缓冲 → 弹簧展开 → 离开延迟 → 临界阻尼收起；全程可打断。

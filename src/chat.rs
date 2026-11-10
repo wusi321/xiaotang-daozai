@@ -5,9 +5,11 @@
 
 use serde_json::{json, Value};
 use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
+use base64::Engine;
 
 const SERVICE: &str = "Daozai.AIChat";
 /// 单次回答最多保留的字符数，防止异常服务端无限刷屏。
@@ -16,6 +18,11 @@ const MAX_ANSWER: usize = 64 * 1024;
 const MAX_CONTEXT: usize = 24 * 1024;
 /// 单次请求的最大时长，兜住没有整体超时的流式读取。
 const MAX_SECONDS: u64 = 300;
+/// 一条消息最多带几个附件；图片与文本都有大小上限，避免一次请求过大。
+pub const MAX_ATTACHMENTS: usize = 5;
+const MAX_IMAGES: usize = 4;
+const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_SYSTEM: &str = "你是岛仔，一只住在桌面小岛上的伙伴。回答简洁、直接，默认用中文。";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -55,6 +62,9 @@ pub struct Config {
     pub system: String,
     pub temperature: f32,
     pub max_tokens: u32,
+    /// 允许岛仔在发送时读取附件内容（图片按 Base64、文本内联）；
+    /// 关闭时只把路径告诉模型。
+    pub read_attachments: bool,
     /// Windows 凭据管理器里的槽位；`None` 表示还没保存过密钥。
     pub slot: Option<String>,
 }
@@ -68,6 +78,7 @@ impl Default for Config {
             system: DEFAULT_SYSTEM.into(),
             temperature: 0.7,
             max_tokens: 1024,
+            read_attachments: false,
             slot: None,
         }
     }
@@ -119,6 +130,7 @@ impl Config {
         if let Some(system) = value["system"].as_str() { config.system = system.into(); }
         if let Some(temperature) = value["temperature"].as_f64() { config.temperature = (temperature as f32).clamp(0.0, 2.0); }
         if let Some(max_tokens) = value["max_tokens"].as_u64() { config.max_tokens = (max_tokens as u32).clamp(64, 8192); }
+        config.read_attachments = value["read_attachments"].as_bool().unwrap_or(false);
         config.slot = value["slot"].as_str().filter(|slot| !slot.is_empty()).map(str::to_owned);
         config
     }
@@ -131,6 +143,7 @@ impl Config {
             "system": self.system,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "read_attachments": self.read_attachments,
             "slot": self.slot,
         })
     }
@@ -156,20 +169,69 @@ impl Role {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome { Streaming, Ok, Stopped, Failed(String) }
 
+/// 附件只记录本机路径，不复制文件；是否读取内容由配置决定。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachmentKind { Image, Text, Other }
+
+impl AttachmentKind {
+    pub fn of(path: &Path) -> Self {
+        let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
+        match extension.as_str() {
+            "png" | "jpg" | "jpeg" | "webp" => Self::Image,
+            "txt" | "md" | "json" | "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "html" | "htm"
+            | "css" | "csv" | "log" | "yaml" | "yml" | "toml" | "xml" | "ini" | "cfg"
+            | "sh" | "ps1" | "bat" | "c" | "h" | "cpp" | "java" | "go" | "kt" | "swift" | "sql" => Self::Text,
+            _ => Self::Other,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self { Self::Image => "图片", Self::Text => "文本", Self::Other => "文件" }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attachment {
+    pub path: PathBuf,
+    pub kind: AttachmentKind,
+}
+
+impl Attachment {
+    pub fn of(path: PathBuf) -> Self { Self { kind: AttachmentKind::of(&path), path } }
+    pub fn name(&self) -> String {
+        self.path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| self.path.display().to_string())
+    }
+    pub fn size(&self) -> u64 { std::fs::metadata(&self.path).map(|meta| meta.len()).unwrap_or(0) }
+}
+
+/// 随消息一起发给模型的路径清单：即使不读取内容，模型也知道附件在哪里。
+pub fn path_summary(attachments: &[Attachment]) -> String {
+    if attachments.is_empty() { return String::new(); }
+    let mut out = String::from("\n\n[附件]\n");
+    for attachment in attachments {
+        out.push_str(&format!("- {}（{}，{}）\n", attachment.path.display(), attachment.kind.label(), crate::model::human_size(attachment.size())));
+    }
+    out.pop();
+    out
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
     pub role: Role,
     pub text: String,
     pub reasoning: String,
     pub outcome: Outcome,
+    pub attachments: Vec<Attachment>,
 }
 
 impl Message {
     pub fn user(text: impl Into<String>) -> Self {
-        Self { role: Role::User, text: text.into(), reasoning: String::new(), outcome: Outcome::Ok }
+        Self { role: Role::User, text: text.into(), reasoning: String::new(), outcome: Outcome::Ok, attachments: Vec::new() }
+    }
+    pub fn user_with(text: impl Into<String>, attachments: Vec<Attachment>) -> Self {
+        Self { attachments, ..Self::user(text) }
     }
     pub fn assistant() -> Self {
-        Self { role: Role::Assistant, text: String::new(), reasoning: String::new(), outcome: Outcome::Streaming }
+        Self { role: Role::Assistant, text: String::new(), reasoning: String::new(), outcome: Outcome::Streaming, attachments: Vec::new() }
     }
     pub fn is_streaming(&self) -> bool { self.outcome == Outcome::Streaming }
     /// 气泡里显示的内容；只有思考没有回答时退而显示思考。
@@ -198,6 +260,8 @@ impl Conversation {
 pub struct ChatRequest {
     pub config: Config,
     pub messages: Vec<Message>,
+    /// 本轮是否读取附件内容；关闭时只发送路径。
+    pub read_attachments: bool,
 }
 
 /// 交给界面消费的流式事件。
@@ -236,14 +300,70 @@ fn context(system: &str, messages: &[Message]) -> Vec<Value> {
     out
 }
 
-fn body(config: &Config, messages: &[Message], stream: bool, max_tokens: u32) -> Value {
+fn body(config: &Config, messages: &[Message], stream: bool, max_tokens: u32, read_attachments: bool) -> Value {
+    let mut rows = context(&config.system, messages);
+    if read_attachments { augment_attachments(&mut rows, messages); }
     json!({
         "model": config.model.trim(),
-        "messages": context(&config.system, messages),
+        "messages": rows,
         "stream": stream,
         "temperature": config.temperature.clamp(0.0, 2.0),
         "max_tokens": max_tokens.clamp(1, 8192),
     })
+}
+
+fn image_data_url(path: &Path) -> Result<String, String> {
+    let meta = std::fs::metadata(path).map_err(|_| "文件不存在或不可读".to_string())?;
+    if meta.len() > MAX_IMAGE_BYTES { return Err(format!("图片超过 {} MB", MAX_IMAGE_BYTES / 1024 / 1024)); }
+    let bytes = std::fs::read(path).map_err(|_| "无法读取文件".to_string())?;
+    let mime = match path.extension().and_then(|value| value.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    };
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+fn read_text(path: &Path) -> Result<(String, bool), String> {
+    let meta = std::fs::metadata(path).map_err(|_| "文件不存在或不可读".to_string())?;
+    if !meta.is_file() { return Err("不是文件".into()); }
+    let bytes = std::fs::read(path).map_err(|_| "无法读取文件".to_string())?;
+    let truncated = bytes.len() > MAX_TEXT_BYTES;
+    Ok((String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_TEXT_BYTES)]).into_owned(), truncated))
+}
+
+/// 只给最后一条用户消息附加内容：历史图片/文本不重复读，省流量也省上下文。
+fn augment_attachments(rows: &mut [Value], messages: &[Message]) {
+    let Some(user) = messages.iter().rev().find(|message| message.role == Role::User && !message.attachments.is_empty()) else { return; };
+    let Some(last) = rows.last_mut() else { return; };
+    if last["role"].as_str() != Some("user") { return; }
+    let mut text = last["content"].as_str().unwrap_or("").to_string();
+    let mut images = Vec::new();
+    for attachment in &user.attachments {
+        match attachment.kind {
+            AttachmentKind::Image => {
+                if images.len() >= MAX_IMAGES { continue; }
+                match image_data_url(&attachment.path) {
+                    Ok(url) => images.push(json!({"type": "image_url", "image_url": {"url": url}})),
+                    Err(error) => text.push_str(&format!("\n（无法读取图片 {}：{error}）", attachment.name())),
+                }
+            }
+            AttachmentKind::Text => match read_text(&attachment.path) {
+                Ok((content, truncated)) => {
+                    text.push_str(&format!("\n\n--- {} ---\n{}{}", attachment.name(), content, if truncated { "\n（内容过长，已截断）" } else { "" }));
+                }
+                Err(error) => text.push_str(&format!("\n（无法读取 {}：{error}）", attachment.name())),
+            },
+            AttachmentKind::Other => text.push_str(&format!("\n（{} 不是可读取的文本或图片，只能提供路径）", attachment.name())),
+        }
+    }
+    *last = if images.is_empty() {
+        json!({"role": "user", "content": text})
+    } else {
+        let mut parts = vec![json!({"type": "text", "text": text})];
+        parts.extend(images);
+        json!({"role": "user", "content": parts})
+    };
 }
 
 // ---------------------------------------------------------------- SSE
@@ -406,7 +526,7 @@ fn check(config: &Config, key: &str) -> Result<(), String> {
 fn stream(key: &str, request: &ChatRequest, cancel: &AtomicBool, tx: &mpsc::Sender<Event>, repaint: &dyn Fn()) -> Result<bool, String> {
     let config = &request.config;
     check(config, key)?;
-    let payload = body(config, &request.messages, true, config.max_tokens);
+    let payload = body(config, &request.messages, true, config.max_tokens, request.read_attachments);
     let has_user = payload["messages"].as_array().is_some_and(|rows| rows.iter().any(|row| row["role"] == "user"));
     if !has_user {
         return Err("这轮对话太长了，请开始新对话".into());
@@ -483,7 +603,7 @@ fn stream(key: &str, request: &ChatRequest, cancel: &AtomicBool, tx: &mpsc::Send
 /// 设置页的「测试连接」：发一条极短的非流式请求，成功才把密钥存入凭据。
 fn test(config: &Config, key: &str) -> Result<TestOk, String> {
     check(config, key)?;
-    let payload = body(config, &[Message::user("回复“好”")], false, 8).to_string();
+    let payload = body(config, &[Message::user("回复“好”")], false, 8, false).to_string();
     let response = agent().post(&config.endpoint())
         .set("Authorization", &format!("Bearer {}", key.trim()))
         .set("Content-Type", "application/json")
@@ -601,7 +721,7 @@ mod tests {
             reply.outcome = Outcome::Ok;
             messages.push(reply);
         }
-        let value = body(&config, &messages, true, 1024);
+        let value = body(&config, &messages, true, 1024, false);
         let rows = value["messages"].as_array().unwrap();
         assert_eq!(rows[0]["role"], "system");
         assert!(rows.len() < 30, "超出预算时应丢弃最早的历史：{}", rows.len());
@@ -616,7 +736,7 @@ mod tests {
         let mut messages = vec![Message::user("在吗")];
         messages.push(Message::assistant()); // Streaming 占位
         messages.push(Message::user("   "));
-        let rows = body(&config, &messages, true, 64)["messages"].as_array().unwrap().clone();
+        let rows = body(&config, &messages, true, 64, false)["messages"].as_array().unwrap().clone();
         assert_eq!(rows.len(), 2, "只有 system 与真实用户消息");
         assert_eq!(rows[1]["content"], "在吗");
     }
@@ -693,5 +813,69 @@ mod tests {
         assert_eq!(full_reply(&value), ("想了想".into(), "好".into()));
         let value: Value = serde_json::from_str("{\"choices\":[{\"message\":{\"role\":\"assistant\"}}]}").unwrap();
         assert_eq!(full_reply(&value), (String::new(), String::new()));
+    }
+
+    fn fixture_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("daozai-chat-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn attachments_are_classified_and_summarized_by_path_only() {
+        let dir = fixture_dir("attach");
+        let text = dir.join("note.md");
+        std::fs::write(&text, "hello 世界").unwrap();
+        let image = dir.join("pixel.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255])).save(&image).unwrap();
+        let other = dir.join("a.bin");
+        std::fs::write(&other, b"x").unwrap();
+        assert_eq!(AttachmentKind::of(&text), AttachmentKind::Text);
+        assert_eq!(AttachmentKind::of(&image), AttachmentKind::Image);
+        assert_eq!(AttachmentKind::of(&other), AttachmentKind::Other);
+        let attachments = vec![Attachment::of(text.clone()), Attachment::of(image.clone()), Attachment::of(other)];
+        let summary = path_summary(&attachments);
+        assert!(summary.contains("note.md") && summary.contains("文本"));
+        assert!(summary.contains("pixel.png") && summary.contains("图片"));
+        assert!(summary.contains("a.bin") && summary.contains("文件"));
+        assert!(summary.contains(&text.display().to_string()), "必须带上完整路径");
+        assert_eq!(path_summary(&[]), "");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reading_attachments_inlines_text_and_builds_image_parts() {
+        let dir = fixture_dir("read");
+        let text = dir.join("note.md");
+        std::fs::write(&text, "hello 世界").unwrap();
+        let image = dir.join("pixel.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255])).save(&image).unwrap();
+        let message = Message::user_with("看看", vec![Attachment::of(text.clone()), Attachment::of(image.clone())]);
+        let config = Config::default();
+        let value = body(&config, std::slice::from_ref(&message), false, 64, true);
+        let rows = value["messages"].as_array().unwrap();
+        let parts = rows.last().unwrap()["content"].as_array().expect("有图片时应为 content 数组");
+        assert_eq!(parts[0]["type"], "text");
+        assert!(parts[0]["text"].as_str().unwrap().contains("hello 世界"), "文本附件应内联");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert!(parts[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+        // 没有读取权限时只发文字与路径，content 仍是字符串。
+        let value = body(&config, &[message], false, 64, false);
+        let content = &value["messages"].as_array().unwrap().last().unwrap()["content"];
+        assert!(content.is_string());
+        assert!(content.as_str().unwrap().contains("看看"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn oversized_or_missing_attachments_degrade_to_a_note_instead_of_failing() {
+        let dir = fixture_dir("missing");
+        let missing = dir.join("gone.png");
+        let message = Message::user_with("看看", vec![Attachment::of(missing)]);
+        let value = body(&Config::default(), &[message], false, 64, true);
+        let content = &value["messages"].as_array().unwrap().last().unwrap()["content"];
+        assert!(content.is_string(), "读不到图片时应退回纯文本");
+        assert!(content.as_str().unwrap().contains("无法读取图片"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
