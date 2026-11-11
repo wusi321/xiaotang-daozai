@@ -619,6 +619,19 @@ impl eframe::App for Shell {
                         Err(error)=>self.app.say(format!("无法选择文件：{}",error.code())),
                     }
                 },
+                Cmd::VoicePickPython=>{
+                    #[cfg(windows)] match daozai::system::pick_files_for("选择 Python 解释器（python.exe）",false) {
+                        Ok(files)=>if let Some(path)=files.into_iter().next(){self.app.voice_set_python(path);},
+                        Err(error)=>self.app.say(format!("无法选择文件：{}",error.code())),
+                    }
+                },
+                Cmd::VoicePickModels=>{
+                    #[cfg(windows)] match daozai::system::pick_folder("选择语音模型目录") {
+                        Ok(Some(path))=>self.app.voice_set_models(path),
+                        Ok(None)=>{},
+                        Err(error)=>self.app.say(format!("无法选择目录：{}",error.code())),
+                    }
+                },
                 Cmd::Focus => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
             }
         }

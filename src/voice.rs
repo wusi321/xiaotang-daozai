@@ -107,6 +107,92 @@ impl Status {
     }
 }
 
+/// 语音运行环境：手工指定的 Python / 模型目录 / 输入设备；留空时自动检测。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Config {
+    pub python: Option<PathBuf>,
+    pub models: Option<PathBuf>,
+    pub device: Option<i32>,
+}
+
+impl Config {
+    fn path() -> PathBuf { crate::model::config_dir().join("voice").join("config.json") }
+
+    pub fn load() -> Self {
+        let Ok(raw) = std::fs::read(Self::path()) else { return Self::default(); };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw) else { return Self::default(); };
+        let path_of = |key: &str| value.get(key).and_then(|v| v.as_str()).filter(|text| !text.trim().is_empty()).map(PathBuf::from);
+        Self {
+            python: path_of("python"),
+            models: path_of("models"),
+            device: value.get("device").and_then(|v| v.as_i64()).map(|v| v as i32),
+        }
+    }
+
+    pub fn save(&self) {
+        let path = Self::path();
+        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+        let json = serde_json::json!({
+            "python": self.python.as_ref().map(|path| path.display().to_string()),
+            "models": self.models.as_ref().map(|path| path.display().to_string()),
+            "device": self.device,
+        });
+        if let Ok(raw) = serde_json::to_vec_pretty(&json) { let _ = crate::model::atomic_write(&path, &raw); }
+    }
+
+    pub fn resolved_python(&self) -> Option<PathBuf> {
+        self.python.clone().filter(|path| path.is_file()).or_else(find_python)
+    }
+
+    pub fn resolved_models(&self) -> Option<PathBuf> {
+        self.models.clone().filter(|path| path.is_dir()).or_else(find_models)
+    }
+
+    /// 一键安装依赖时用的虚拟环境；和 `find_python` 的自动检测路径保持一致。
+    pub fn venv_dir() -> PathBuf {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default()
+            .join("Daozai").join("voice").join("venv")
+    }
+
+    /// 下载模型的默认目录；Python 侧会优先在这里找。
+    pub fn default_models_dir() -> PathBuf {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default()
+            .join("Daozai").join("voice").join("models")
+    }
+}
+
+/// 目录里是否有语音需要的三类模型（SenseVoice / silero VAD / CAM++ 声纹）。
+pub fn has_models(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false; };
+    let (mut sense, mut vad, mut speaker) = (false, false, false);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if path.is_dir() && name.starts_with("sherpa-onnx-sense-voice") && path.join("model.int8.onnx").is_file() { sense = true; }
+        if name == "silero_vad.onnx" { vad = true; }
+        if name == "speaker" && std::fs::read_dir(&path).map(|items| items.flatten().any(|item| item.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".onnx"))).unwrap_or(false) {
+            speaker = true;
+        }
+    }
+    sense && vad && speaker
+}
+
+fn find_models() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("DAOZAI_VOICE_MODELS") {
+        let path = PathBuf::from(path);
+        if path.is_dir() { return Some(path); }
+    }
+    let mut candidates = vec![Config::default_models_dir()];
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join("Jarvis").join("models"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() { candidates.push(dir.join("voice").join("models")); }
+    }
+    candidates.push(PathBuf::from(r"D:\dsh-voice-models"));
+    candidates.into_iter().find(|path| has_models(path))
+}
+
 /// 常驻的语音子进程。
 pub(crate) struct Service {
     child: Child,
@@ -115,9 +201,9 @@ pub(crate) struct Service {
 }
 
 impl Service {
-    pub(crate) fn start(ctx: egui::Context) -> Result<Self, String> {
-        let python = find_python().ok_or_else(|| {
-            "找不到 Python：语音唤醒需要本机的 sherpa-onnx（装过贾维斯就自带）".to_string()
+    pub(crate) fn start(ctx: egui::Context, config: &Config) -> Result<Self, String> {
+        let python = config.resolved_python().ok_or_else(|| {
+            "找不到 Python：到 设置 → 常规 → 语音 里选择 Python 或安装语音依赖".to_string()
         })?;
         let script = find_script()
             .ok_or_else(|| "找不到 voice/daozai_voice.py（语音脚本没跟程序放在一起）".to_string())?;
@@ -136,10 +222,14 @@ impl Service {
         if std::env::var_os("DAOZAI_VOICE_DEBUG").is_some() {
             command.arg("--debug");
         }
-        if let Some(models) = std::env::var_os("DAOZAI_VOICE_MODELS") {
+        if let Some(models) = config.resolved_models() {
+            command.arg("--models").arg(models);
+        } else if let Some(models) = std::env::var_os("DAOZAI_VOICE_MODELS") {
             command.arg("--models").arg(models);
         }
-        if let Some(device) = std::env::var_os("DAOZAI_VOICE_DEVICE") {
+        if let Some(device) = config.device {
+            command.arg("--device").arg(device.to_string());
+        } else if let Some(device) = std::env::var_os("DAOZAI_VOICE_DEVICE") {
             command.arg("--device").arg(device);
         }
         if std::env::var_os("DAOZAI_VOICE_LOOSE").is_some() {
@@ -278,9 +368,16 @@ fn find_python() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         let local = PathBuf::from(local);
-        candidates.push(local.join("Jarvis").join("venv").join("Scripts").join("pythonw.exe"));
-        candidates.push(local.join("Jarvis").join("venv").join("Scripts").join("python.exe"));
-        candidates.push(local.join("Daozai").join("voice").join("venv").join("Scripts").join("pythonw.exe"));
+        // 真正的运行环境优先用已经装好依赖的 venv；贾维斯自带的 base Python 只作兜底。
+        let daozai = local.join("Daozai").join("voice").join("venv");
+        candidates.push(daozai.join("Scripts").join("pythonw.exe"));
+        candidates.push(daozai.join("Scripts").join("python.exe"));
+        let venv = local.join("Jarvis").join("venv").join("Scripts");
+        candidates.push(venv.join("pythonw.exe"));
+        candidates.push(venv.join("python.exe"));
+        let python = local.join("Jarvis").join("python");
+        candidates.push(python.join("pythonw.exe"));
+        candidates.push(python.join("python.exe"));
     }
     for name in ["pythonw.exe", "python.exe"] {
         if let Ok(path) = which(name) {
@@ -360,21 +457,19 @@ fn ensure_embedded_script() -> Option<PathBuf> {
 impl App {
     /// 每帧调用：按开关起停子进程，把识别出的文字送进对话页。
     pub(crate) fn voice_tick(&mut self, ctx: &egui::Context, cmds: &mut Vec<Cmd>) {
-        if !self.settings.voice_wake && self.voice.is_none() {
-            return; // 没开语音时每帧什么都不做
-        }
+        self.voice_setup_tick(ctx);
         if std::env::var_os("DAOZAI_VOICE_OFF").is_some() {
             return;
         }
         if self.settings.voice_wake {
-            if self.voice.is_none() {
+            if self.voice.is_none() && self.t >= self.voice_retry_at {
                 self.voice_status = Status { starting: true, ..Status::default() };
-                match Service::start(ctx.clone()) {
+                match Service::start(ctx.clone(), &self.voice_config) {
                     Ok(service) => self.voice = Some(service),
                     Err(error) => {
                         self.voice_status = Status { message: error, ..Status::default() };
-                        self.settings.voice_wake = false;
-                        self.settings.save();
+                        // 不自动关掉开关：用户可能正在下载模型或安装依赖；5 秒后再试。
+                        self.voice_retry_at = self.t + 5.0;
                     }
                 }
             }
@@ -398,6 +493,115 @@ impl App {
                 self.voice_send(text, cmds);
             }
         }
+    }
+
+    fn voice_setup_tick(&mut self, ctx: &egui::Context) {
+        let mut events = Vec::new();
+        if let Some(setup) = self.voice_setup.as_ref() {
+            while let Some(event) = setup.try_recv() { events.push(event); }
+        }
+        if events.is_empty() { return; }
+        for event in events {
+            match event {
+                crate::voice_setup::Event::Log(line) => {
+                    self.voice_log.push(line);
+                    if self.voice_log.len() > 80 { let extra = self.voice_log.len() - 80; self.voice_log.drain(..extra); }
+                }
+                crate::voice_setup::Event::Progress { label, done, total } => {
+                    self.voice_progress = Some((label, done, total));
+                }
+                crate::voice_setup::Event::Done { kind, detail } => {
+                    self.voice_setup = None;
+                    self.voice_progress = None;
+                    match kind {
+                        crate::voice_setup::Kind::Models => {
+                            self.voice_config.models = Some(PathBuf::from(&detail));
+                            self.voice_config.save();
+                            self.voice_log.push(format!("模型已就绪：{detail}"));
+                        }
+                        crate::voice_setup::Kind::Env => {
+                            self.voice_config.python = Some(PathBuf::from(&detail));
+                            self.voice_config.save();
+                            self.voice_log.push(format!("语音依赖装好了：{detail}"));
+                        }
+                    }
+                    self.voice_restart();
+                }
+                crate::voice_setup::Event::Failed(error) => {
+                    self.voice_setup = None;
+                    self.voice_progress = None;
+                    self.voice_log.push(format!("失败：{error}"));
+                }
+                crate::voice_setup::Event::Cancelled => {
+                    self.voice_setup = None;
+                    self.voice_progress = None;
+                    self.voice_log.push("已取消".into());
+                }
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    /// 用当前配置重新起语音子进程（选择路径、装完依赖后调用）。
+    fn voice_restart(&mut self) {
+        self.voice = None;
+        self.voice_retry_at = 0.0;
+        self.voice_status = Status::default();
+    }
+
+    pub fn voice_set_python(&mut self, path: PathBuf) {
+        self.voice_config.python = Some(path);
+        self.voice_config.save();
+        self.voice_restart();
+    }
+
+    pub fn voice_set_models(&mut self, path: PathBuf) {
+        self.voice_config.models = Some(path);
+        self.voice_config.save();
+        self.voice_restart();
+    }
+
+    /// 设置页「下载语音模型」。
+    pub(crate) fn voice_download_models(&mut self, ctx: &egui::Context) {
+        if self.voice_setup.is_some() { return; }
+        if self.voice_models_ready() {
+            self.voice_log = vec!["已经找到可用的语音模型，不用重复下载".into()];
+            return;
+        }
+        let dir = self.voice_config.models.clone().filter(|path| path.is_dir())
+            .unwrap_or_else(Config::default_models_dir);
+        self.voice_log = vec![format!("下载到：{}", dir.display())];
+        self.voice_progress = Some((String::new(), 0, crate::voice_setup::model_total_bytes()));
+        self.voice_setup = Some(crate::voice_setup::Service::download(ctx.clone(), dir));
+    }
+
+    /// 设置页「安装语音依赖」：建 venv 并装 sherpa-onnx / numpy / sounddevice。
+    pub(crate) fn voice_install_env(&mut self, ctx: &egui::Context) {
+        if self.voice_setup.is_some() { return; }
+        let Some(python) = self.voice_config.resolved_python() else {
+            self.voice_log = vec!["先选择一个 Python 解释器（需要 Python 3.10+）".into()];
+            return;
+        };
+        let venv = Config::venv_dir();
+        self.voice_log = vec![format!("使用 Python：{}", python.display()), format!("安装到：{}", venv.display())];
+        self.voice_setup = Some(crate::voice_setup::Service::install_env(ctx.clone(), python, venv));
+    }
+
+    pub(crate) fn voice_cancel_setup(&mut self) {
+        if let Some(setup) = self.voice_setup.as_ref() { setup.cancel(); }
+    }
+
+    /// 设置页显示的两行环境信息：Python 与模型目录。
+    pub(crate) fn voice_env_summary(&self) -> (String, String) {
+        let python = self.voice_config.resolved_python().map(|path| path.display().to_string())
+            .unwrap_or_else(|| "未找到（可安装语音依赖或选择 python.exe）".into());
+        let models = self.voice_config.resolved_models().map(|path| path.display().to_string())
+            .unwrap_or_else(|| "未找到（可下载约 270 MB 模型）".into());
+        (python, models)
+    }
+
+    pub(crate) fn voice_models_ready(&self) -> bool {
+        self.voice_config.resolved_models().is_some_and(|path| has_models(&path))
     }
 
     fn voice_event(&mut self, event: Event, cmds: &mut Vec<Cmd>) {
@@ -470,6 +674,16 @@ impl App {
                 self.voice_status.starting = false;
                 if self.voice_status.message.is_empty() {
                     self.voice_status.message = "语音服务已退出".into();
+                }
+                // 环境类错误（缺 Python/依赖/模型）重试也没用，先关掉开关并保留原因；
+                // 其它意外退出隔 5 秒再拉起，避免疯狂重启。
+                let fatal = ["缺少", "找不到", "依赖", "模型", "Python"].iter()
+                    .any(|word| self.voice_status.message.contains(word));
+                if fatal {
+                    self.settings.voice_wake = false;
+                    self.settings.save();
+                } else {
+                    self.voice_retry_at = self.t + 5.0;
                 }
                 self.voice = None;
                 // 子进程意外退出（模型缺失、Python 崩了）时把开关关掉：
@@ -594,7 +808,7 @@ mod tests {
     #[test]
     #[ignore = "需要本机 Python 与语音模型"]
     fn spawns_the_helper_and_reads_its_ready_event() {
-        let mut service = Service::start(egui::Context::default()).expect("启动语音子进程");
+        let mut service = Service::start(egui::Context::default(), &Config::default()).expect("启动语音子进程");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         let mut ready = false;
         while !ready && std::time::Instant::now() < deadline {

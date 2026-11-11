@@ -196,6 +196,9 @@ pub enum Cmd {
     ChatForget(String),
     /// 选择附件（图片或文件）加入对话。
     ChatAttach,
+    /// 语音环境：选择 Python 解释器 / 模型目录。
+    VoicePickPython,
+    VoicePickModels,
 }
 
 /// 毛玻璃皮肤下原生窗口区域的组成部分（相对 `win` 左上角，逻辑点）。
@@ -744,6 +747,14 @@ pub struct App {
     /// 语音唤醒子进程（开开关时才有）与它最近的状态。
     pub(crate) voice: Option<crate::voice::Service>,
     pub(crate) voice_status: crate::voice::Status,
+    /// 语音环境：手工指定的 Python / 模型目录 / 设备。
+    pub(crate) voice_config: crate::voice::Config,
+    /// 设置页里正在跑的「下载模型 / 安装依赖」任务。
+    pub(crate) voice_setup: Option<crate::voice_setup::Service>,
+    pub(crate) voice_log: Vec<String>,
+    pub(crate) voice_progress: Option<(String, u64, u64)>,
+    /// 启动失败后隔几秒再试，避免每帧都去 spawn。
+    pub(crate) voice_retry_at: f64,
     /// 上一句回答还没生成完时收到的语音，等生成完再发。
     pub(crate) voice_pending: Option<String>,
     pub(crate) updates: crate::updates::State,
@@ -852,6 +863,11 @@ impl App {
             chat: crate::chat_ui::State::load(),
             voice: None,
             voice_status: Default::default(),
+            voice_config: crate::voice::Config::load(),
+            voice_setup: None,
+            voice_log: Vec::new(),
+            voice_progress: None,
+            voice_retry_at: 0.0,
             voice_pending: None,
             updates: Default::default(),
             resident: Default::default(), resident_power:(None,false),

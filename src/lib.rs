@@ -17,6 +17,7 @@ mod calendar_ui;
 pub mod chat;
 mod chat_ui;
 pub mod voice;
+mod voice_setup;
 mod local_calendar;
 mod calendar_editor;
 pub mod glass;

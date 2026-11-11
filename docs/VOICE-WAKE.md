@@ -106,3 +106,41 @@ set DAOZAI_VOICE_PYTHON=%LOCALAPPDATA%\Jarvis\venv\Scripts\python.exe
 音量和距离），或把 `voiceprint.json` 里的 `threshold` 调高 0.05。
 
 **录不进去**：每句话至少要说 1 秒以上，太短会被判为听不清；状态行会提示重说。
+
+## 环境配置（参考贾维斯）
+
+设置页里的「下载语音模型 / 安装语音依赖」沿用了贾维斯 `app/install.py` 的思路：
+
+- **Python 顺序**：`DAOZAI_VOICE_PYTHON` → 岛仔自己的 venv（`%LOCALAPPDATA%\Daozai\voice\venv`）→
+  贾维斯 venv（`%LOCALAPPDATA%\Jarvis\venv`，装过贾维斯就直接用）→ 贾维斯自带 Python
+  （`%LOCALAPPDATA%\Jarvis\python`）→ PATH。
+- **依赖源顺序**：清华 → 阿里云 → PyPI，任一成功即停。
+- **模型**：优先复用 `%LOCALAPPDATA%\Jarvis\models`；没有时才下载到
+  `%LOCALAPPDATA%\Daozai\voice\models`，先 hf-mirror、失败换 huggingface，支持 `.part` 断点续传。
+- 选择和下载结果保存在 `%APPDATA%\Daozai\voice\config.json`，改完会自动重启语音子进程。
+
+## 如果要做 KWS（声学唤醒）
+
+现在每句话都要跑 SenseVoice，空闲 CPU 约 3~8%、唤醒延迟约 1 秒。想更省电、更快，可以加一层
+关键词检测，让 ASR 只在命中后才跑：
+
+**推荐：sherpa-onnx KWS + 现有 ASR 复核**
+
+1. 模型用 `sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01`（中文，约 3 MB）或英文版；
+   比 SenseVoice 小两个数量级。
+2. 关键词写在 `keywords.txt` 里，用模型 tokens 的拼音/音素表示（例如「你好岛崽」拆成
+   `n ǐ h ǎo d ǎo z ǎi`，不同版本 token 集略有差异）。
+3. 每 80 ms 喂一帧，`is_ready` → `decode_stream` → `get_result`；命中先发 `{"t":"wake"}`，
+   再开 3~5 s 的 VAD 窗口收命令，只对这一句跑 ASR。
+4. 命中后仍用现在这套文本正则 + 声纹复核，压误唤醒；KWS 只负责「可能喊了」。
+5. 调参：`keywords-score`、`keywords-threshold`、`num-trailing-blanks`；用 50 条正样本
+   （不同距离/音量）和 50 条负样本（电视、闲聊）测误唤醒与漏唤醒。
+
+**其它路线**
+
+- **openWakeWord 自训练**：像贾维斯的「hey jarvis」，用 TTS 合成 + 真实录音训练；英文生态成熟，
+  中文需要自己造数据和训练。
+- **Porcupine（Picovoice）**：中文自定义词、接入快、CPU 低；需要 AccessKey，许可证与开源分发要确认。
+- **自训 BC-ResNet / zipformer KWS**：效果最好、可控性最强，但要做数据、训练和导出 ONNX，工作量最大。
+
+建议先上 sherpa KWS 做门控，保留 ASR 复核和声纹；模型与关键词都放本机，沿用设置页的下载与配置方式。

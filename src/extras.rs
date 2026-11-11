@@ -1330,6 +1330,41 @@ impl App {
                                     self.voice_cancel_enroll();
                                 }
                             });
+                            ui.separator();
+                            let (python, models) = self.voice_env_summary();
+                            settings_hint(ui,&format!("Python：{python}"));
+                            settings_hint(ui,&format!("模型：{models}{}",if self.voice_models_ready(){"（已就绪）"}else{""}));
+                            let busy = self.voice_setup.is_some();
+                            ui.horizontal_wrapped(|ui|{
+                                if ui.add_enabled(!busy,egui::Button::new("选择 Python")).on_hover_text("选择 python.exe（3.10 及以上）").clicked() {
+                                    self.pending.push(Cmd::VoicePickPython);
+                                }
+                                if ui.add_enabled(!busy,egui::Button::new("选择模型目录")).clicked() {
+                                    self.pending.push(Cmd::VoicePickModels);
+                                }
+                                if ui.add_enabled(!busy,egui::Button::new("下载语音模型")).on_hover_text("约 270 MB，下载到当前模型目录").clicked() {
+                                    self.voice_download_models(ui.ctx());
+                                }
+                                if ui.add_enabled(!busy,egui::Button::new("安装语音依赖")).on_hover_text("创建 venv 并安装 sherpa-onnx / numpy / sounddevice").clicked() {
+                                    self.voice_install_env(ui.ctx());
+                                }
+                                if ui.add_enabled(!busy,egui::Button::new("打开语音目录")).clicked() {
+                                    self.pending.push(Cmd::Open(crate::model::config_dir().join("voice")));
+                                }
+                            });
+                            if busy {
+                                if let Some((label,done,total)) = self.voice_progress.clone() {
+                                    let fraction = if total>0 {(done as f32/total as f32).clamp(0.0,1.0)}else{0.0};
+                                    let text = if total>0 {
+                                        format!("{}{:.0} / {:.0} MB",if label.is_empty(){String::new()}else{format!("{label}  ")},done as f64/1048576.0,total as f64/1048576.0)
+                                    } else { label };
+                                    ui.add(egui::ProgressBar::new(fraction).text(text));
+                                }
+                                if ui.button("取消").clicked() { self.voice_cancel_setup(); }
+                            }
+                            for line in self.voice_log.iter().rev().take(4) {
+                                settings_hint(ui,line);
+                            }
                         });
                     }
                     1=>{
