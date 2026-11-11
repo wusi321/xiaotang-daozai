@@ -8,12 +8,14 @@
 
 Windows 桌面伙伴，把消息、音乐、日程、AI 额度与对话放到手边。
 
-[![最新版本](https://img.shields.io/github/v/release/Renly1994/xiaotang-daozai?color=7955b8&label=最新版本)](https://github.com/Renly1994/xiaotang-daozai/releases/latest)
+[![最新版本](https://img.shields.io/github/v/release/wusi321/xiaotang-daozai?color=7955b8&label=最新版本)](https://github.com/wusi321/xiaotang-daozai/releases/latest)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4)](#下载安装)
 [![开源许可](https://img.shields.io/badge/License-MIT-3cbf91)](LICENSE)
 [![Rust 与 egui](https://img.shields.io/badge/Rust-egui-8b6ca8)](#从源码构建与参与开发)
 
-**[下载 Windows 版](https://github.com/Renly1994/xiaotang-daozai/releases/latest)** · [使用指南](docs/USAGE.md) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Renly1994/xiaotang-daozai/issues)
+**[下载 Windows 版](https://github.com/wusi321/xiaotang-daozai/releases/latest)** · [使用指南](docs/USAGE.md) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/wusi321/xiaotang-daozai/issues)
+
+> 本项目基于小唐老师的 [岛仔 · Daozai](https://github.com/Renly1994/xiaotang-daozai) 继续开发，感谢原作者。
 
 </div>
 
@@ -136,7 +138,7 @@ Windows 桌面伙伴，把消息、音乐、日程、AI 额度与对话放到手
 
 ## 下载安装
 
-前往 **[最新正式版](https://github.com/Renly1994/xiaotang-daozai/releases/latest)**，按使用习惯选择：
+前往 **[最新正式版](https://github.com/wusi321/xiaotang-daozai/releases/latest)**，按使用习惯选择：
 
 | 下载文件 | 使用方式 |
 | --- | --- |
@@ -204,6 +206,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package.ps1
 项目结构、界面预览与贡献方式见 [开发指南](CONTRIBUTING.md)。
 
 </details>
+
+## 关于这个仓库
+
+本仓库是 [小唐老师（Renly1994）](https://github.com/Renly1994) 的 [岛仔 · Daozai](https://github.com/Renly1994/xiaotang-daozai) 的延续版本。原项目提供了桌面小岛、音乐、日程、邮件与 AI 额度等基础，本仓库在此基础上继续加入 AI 对话、语音唤醒与附件等功能。
+
+- **[原仓库](https://github.com/Renly1994/xiaotang-daozai)**：原始项目与设计，仍在独立维护。
+- 本仓库的 [Releases](https://github.com/wusi321/xiaotang-daozai/releases)、[Issues](https://github.com/wusi321/xiaotang-daozai/issues) 与「检查更新」都指向这里。
+- 感谢小唐老师开源这个项目，以及 README 中列出的所有贡献者、皮肤与素材作者。
 
 ## 开源与致谢
 

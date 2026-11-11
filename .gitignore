@@ -20,5 +20,7 @@ Thumbs.db
 /GDDXX-Jarvis/
 # 语音模型的本地副本（几百 MB，按需下载，见 docs/VOICE-WAKE.md）
 /voice/models/
+# 设置页里把模型下到仓库目录时也忽略（默认在 %LOCALAPPDATA%\Daozai\voice\models）
+/models/
 __pycache__/
 *.pyc

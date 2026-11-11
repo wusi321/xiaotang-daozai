@@ -2,9 +2,9 @@
 use eframe::egui;
 use std::{io::{Read, Write}, path::PathBuf, sync::{mpsc::{self, Receiver}, Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
 
-const REPOSITORY: &str = "https://github.com/Renly1994/xiaotang-daozai";
-const API: &str = "https://api.github.com/repos/Renly1994/xiaotang-daozai/releases/latest";
-const RELEASES: &str = "https://github.com/Renly1994/xiaotang-daozai/releases/latest";
+const REPOSITORY: &str = "https://github.com/wusi321/xiaotang-daozai";
+const API: &str = "https://api.github.com/repos/wusi321/xiaotang-daozai/releases/latest";
+const RELEASES: &str = "https://github.com/wusi321/xiaotang-daozai/releases/latest";
 const BACKUP_DOWNLOAD: &str = "https://pan.quark.cn/s/0a39b4e1f332";
 
 #[derive(Clone, Debug)]

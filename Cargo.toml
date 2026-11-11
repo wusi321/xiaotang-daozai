@@ -1,10 +1,10 @@
 [package]
 name = "daozai"
-version = "0.6.73"
+version = "0.6.74"
 edition = "2021"
 license = "MIT"
 description = "岛仔：Windows 顶部的桌面伙伴与信息岛"
-repository = "https://github.com/Renly1994/xiaotang-daozai"
+repository = "https://github.com/wusi321/xiaotang-daozai"
 default-run = "daozai"
 
 [lib]
