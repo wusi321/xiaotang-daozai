@@ -17,6 +17,11 @@ if(Test-Path -LiteralPath $exePath){Copy-Item -LiteralPath $exePath -Destination
 Copy-Item -LiteralPath $sourcePath -Destination $exePath -Force
 if(Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\THIRD_PARTY_NOTICES.txt')){Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\THIRD_PARTY_NOTICES.txt') -Destination (Join-Path $installDir 'THIRD_PARTY_NOTICES.txt') -Force}
 if(Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\LICENSE')){Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\LICENSE') -Destination (Join-Path $installDir 'LICENSE') -Force}
+if(Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\voice\daozai_voice.py')){
+    $voiceDir=Join-Path $installDir 'voice'
+    New-Item -ItemType Directory -Path $voiceDir -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\voice\daozai_voice.py') -Destination (Join-Path $voiceDir 'daozai_voice.py') -Force
+}
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'uninstall.ps1') -Destination (Join-Path $installDir 'uninstall.ps1') -Force
 $shell=New-Object -ComObject WScript.Shell
 $entries=@(

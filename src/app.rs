@@ -741,6 +741,11 @@ pub struct App {
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
     pub(crate) chat: crate::chat_ui::State,
+    /// 语音唤醒子进程（开开关时才有）与它最近的状态。
+    pub(crate) voice: Option<crate::voice::Service>,
+    pub(crate) voice_status: crate::voice::Status,
+    /// 上一句回答还没生成完时收到的语音，等生成完再发。
+    pub(crate) voice_pending: Option<String>,
     pub(crate) updates: crate::updates::State,
     pub(crate) resident: bar::Motion,
     pub(crate) resident_power: (Option<u8>,bool),
@@ -845,6 +850,9 @@ impl App {
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             chat: crate::chat_ui::State::load(),
+            voice: None,
+            voice_status: Default::default(),
+            voice_pending: None,
             updates: Default::default(),
             resident: Default::default(), resident_power:(None,false),
         }
@@ -1554,6 +1562,7 @@ impl App {
             if self.page==CALENDAR_PAGE {self.request_calendar_month(false);}
         }
         let mut cmds = Vec::new();
+        self.voice_tick(&ctx, &mut cmds);
 
         self.tick(env, dt, elapsed);
         self.sync_device(env);

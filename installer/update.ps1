@@ -34,6 +34,15 @@ try {
         $entries = @($zip.Entries | Where-Object {$_.FullName.Replace('\','/') -ceq $name})
         if ($entries.Count -ne 1 -or $entries[0].Length -gt 200MB) { throw '更新包中缺少唯一的岛仔程序。' }
         [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $staged)
+        # 语音脚本也随更新包一起换掉；老版本程序本身不读它（脚本已编进 exe），
+        # 这里主要是让安装目录里的副本保持可手动运行。
+        $voiceName = 'Daozai-v' + $version + '-windows-x64/voice/daozai_voice.py'
+        $voiceEntries = @($zip.Entries | Where-Object {$_.FullName.Replace('\','/') -ceq $voiceName})
+        if ($voiceEntries.Count -eq 1 -and $voiceEntries[0].Length -lt 1MB) {
+            $voiceDir = Join-Path $targetDir 'voice'
+            New-Item -ItemType Directory -Path $voiceDir -Force | Out-Null
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($voiceEntries[0], (Join-Path $voiceDir 'daozai_voice.py'), $true)
+        }
     } finally { $zip.Dispose() }
     $actual = [Diagnostics.FileVersionInfo]::GetVersionInfo($staged).FileVersion
     if ($actual -ne $version -and $actual -ne "$version.0") { throw '安装包版本不匹配。' }

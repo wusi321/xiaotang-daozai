@@ -1311,6 +1311,26 @@ impl App {
                             ui.separator();
                             setting_row(ui,"全屏时隐藏","游戏、视频和演示全屏时隐藏",&mut self.settings.hide_fullscreen);
                         });
+                        settings_label(ui,"语音");
+                        settings_card(ui,|ui|{
+                            setting_row(ui,"语音唤醒","喊「你好岛崽」就开始说话；识别在本机完成，录音不出电脑",&mut self.settings.voice_wake);
+                            let status = self.voice_status.describe();
+                            settings_hint(ui,&status);
+                            let running = self.voice_status.running;
+                            let enrolled = self.voice_status.voiceprint;
+                            let enrolling = self.voice_status.enroll.is_some();
+                            ui.horizontal(|ui|{
+                                if ui.add_enabled(running&&!enrolling,egui::Button::new("录入我的声音")).on_hover_text("读三句话，之后只认你的声音").clicked() {
+                                    self.voice_enroll();
+                                }
+                                if ui.add_enabled(!enrolling,egui::Button::new("忘掉我的声音")).on_hover_text(if enrolled {"删除声纹，谁喊都能唤醒"}else{"还没有录入"}).clicked() {
+                                    self.voice_forget();
+                                }
+                                if enrolling&&ui.button("取消录入").clicked() {
+                                    self.voice_cancel_enroll();
+                                }
+                            });
+                        });
                     }
                     1=>{
                         settings_label(ui,"歌词");

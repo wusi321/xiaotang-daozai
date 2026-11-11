@@ -15,3 +15,10 @@
 *.key
 .DS_Store
 Thumbs.db
+
+# 从 GitHub 取来参考的贾维斯源码：只作本地对照，不进本仓库
+/GDDXX-Jarvis/
+# 语音模型的本地副本（几百 MB，按需下载，见 docs/VOICE-WAKE.md）
+/voice/models/
+__pycache__/
+*.pyc

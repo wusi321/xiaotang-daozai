@@ -42,6 +42,11 @@ try {
     @('LICENSE','THIRD_PARTY_NOTICES.txt') | ForEach-Object {
         Copy-Item -LiteralPath (Join-Path $projectRoot $_) -Destination $stagingDirectory -Recurse
     }
+    $voiceFile = Join-Path $projectRoot 'voice\daozai_voice.py'
+    if (Test-Path -LiteralPath $voiceFile) {
+        New-Item -ItemType Directory -Path (Join-Path $stagingDirectory 'voice') -Force | Out-Null
+        Copy-Item -LiteralPath $voiceFile -Destination (Join-Path $stagingDirectory 'voice\daozai_voice.py')
+    }
     $setup = Join-Path $outputDirectory "Daozai-Setup-v$version-x64.exe"
     & $NsisCompiler /V2 /WX "/DAPP_VERSION=$version" "/DPROJECT_DIR=$projectRoot" "/DSOURCE_EXE=$($binary.FullName)" "/DOUTPUT_FILE=$setup" (Join-Path $projectRoot 'installer\setup.nsi')
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
