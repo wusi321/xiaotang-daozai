@@ -6495,3 +6495,59 @@ fn claude_local_only_settings_show_notice_without_manual_reset_controls(){
         assert!(h.app.quota.gemini_connecting.is_none()&&h.app.quota.workbuddy_connecting.is_none()&&h.app.quota.login.is_none());
     }
 }
+
+#[test]
+fn voice_wake_shows_a_long_capsule_then_opens_chat_after_the_reply(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.chat.config.slot=Some("test".into());
+    let mut cmds=Vec::new();
+    h.app.voice_event(crate::voice::Event::Wake("你好岛崽".into()),&mut cmds);
+    for _ in 0..40 {h.frame(vec![]);}
+    assert_eq!(h.app.voice_phase,Some(crate::voice::Phase::Listening));
+    assert!(!h.app.open,"唤醒时先不展开整块面板");
+    assert!(h.region.width()>250.0,"唤醒后应变成长条胶囊，实际宽 {}",h.region.width());
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="在听你说…")),"胶囊应显示「在听你说…」");
+    h.app.voice_event(crate::voice::Event::Command("今天天气怎么样".into()),&mut cmds);
+    for _ in 0..40 {h.frame(vec![]);}
+    assert!(!h.app.open,"模型回答时仍保持胶囊，不提前展开");
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="正在想…")),"等待回答时应显示「正在想…」");
+    h.app.chat_event(crate::chat::Event::Done{ms:800});
+    for _ in 0..20 {h.frame(vec![]);}
+    assert_eq!(h.app.page,crate::app::CHAT_PAGE,"回答完成后应展开对话页");
+    assert!(h.app.open,"回答完成后应自动展开");
+    assert!(h.app.voice_phase.is_none(),"展开后胶囊状态应清除");
+}
+
+#[test]
+fn ai_reply_notice_opens_the_chat_page_instead_of_settings(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.alert("AI 回复已就绪","回复内容",crate::app::CHAT_PAGE,false);
+    for _ in 0..30 {h.frame(vec![]);}
+    h.click_notice_badge();
+    h.frame(vec![]);
+    h.click_text("查看");
+    assert_eq!(h.app.page,crate::app::CHAT_PAGE,"点 AI 回复通知应打开对话页");
+    assert!(!h.app.settings_open,"点 AI 回复通知不应打开设置");
+}
+
+#[test]
+#[ignore="生成语音胶囊预览图，人工查看"]
+fn preview_voice_capsule(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.chat.config.slot=Some("test".into());
+    h.app.voice_event(crate::voice::Event::Wake("你好岛崽".into()),&mut Vec::new());
+    for _ in 0..40 {h.frame(vec![]);}
+    let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-10-31".into(),date:"10月31日 周六".into(),..Default::default()};
+    let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(h.t),..Default::default()};
+    let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});});
+    let mut raster=crate::preview_raster::Raster::new(WIN_W as usize,WIN_H as usize);
+    raster.update_textures(&output.textures_delta);
+    raster.buf.fill([0.09,0.11,0.18,1.0]);
+    raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+    let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+    std::fs::create_dir_all("target").ok();
+    image::save_buffer("target/voice-capsule.png",&rgba,WIN_W as u32,WIN_H as u32,image::ColorType::Rgba8).unwrap();
+}

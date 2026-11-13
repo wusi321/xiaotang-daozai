@@ -457,7 +457,7 @@ impl App {
                                 self.todo_first=index.min(order.len().saturating_sub(3));
                             }
                         }
-                    }else{self.settings_tab=6;self.open_settings();}
+                    }else{self.show_page(a.page);}
                 }
             }
         }

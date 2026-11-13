@@ -47,6 +47,8 @@ SR = 16000
 FRAME = 512  # 32 ms：silero 要求的窗口
 MIN_SILENCE = 0.35
 MIN_SPEECH = 0.2
+HISTORY = 15.0   # 保留多少秒原始麦克风音频，用来补 VAD 切掉的句首
+PREROLL = 0.5    # 每句话前面多带 0.5 秒：VAD 触发时第一个字常被切掉
 MAX_SPEECH = 12.0
 
 # ---------------------------------------------------------------- 唤醒词
@@ -288,6 +290,9 @@ class Engine:
         self.pending_commands = queue.Queue()
         self.last_level = 0.0
         self.silent_since = None
+        self.preroll = float(getattr(args, "preroll", PREROLL))
+        self.history = np.zeros(0, np.float32)
+        self.history_start = 0
 
     # -- 输出 ---------------------------------------------------------
     def emit(self, payload: dict):
@@ -451,9 +456,23 @@ class Engine:
             self.silent_since = now
             self.emit({"t": "warn", "message": "麦克风一直没有声音：检查是否被静音，或换一个输入设备"})
         self.vad.accept_waveform(frame)
+        # 留一段原始音频：VAD 报出的片段从它自己检测到的起点开始，
+        # 常常把句首（「你」）切掉，这里补上 preroll 秒再识别。
+        self.history = np.concatenate((self.history, frame))
+        if len(self.history) > (HISTORY + 1.0) * SR:
+            drop = len(self.history) - int(HISTORY * SR)
+            self.history = self.history[drop:]
+            self.history_start += drop
         while not self.vad.empty():
             segment = self.vad.front
-            samples = np.asarray(segment.samples, dtype=np.float32)
+            start = int(segment.start)
+            end = start + len(segment.samples)
+            begin = max(self.history_start, start - int(self.preroll * SR))
+            lo, hi = begin - self.history_start, end - self.history_start
+            if 0 <= lo < hi <= len(self.history):
+                samples = self.history[lo:hi].copy()
+            else:
+                samples = np.asarray(segment.samples, dtype=np.float32)
             self.vad.pop()
             try:
                 self.handle_segment(samples)
@@ -561,6 +580,7 @@ def main():
     parser.add_argument("--profile", help="声纹文件路径")
     parser.add_argument("--device", type=int, default=None, help="输入设备编号")
     parser.add_argument("--follow", type=float, default=8.0, help="唤醒后多久内不用再喊唤醒词")
+    parser.add_argument("--preroll", type=float, default=PREROLL, help="每句话前补多少秒，避免句首被 VAD 切掉")
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--loose", action="store_true", help="只说“岛仔”也能唤醒")
     parser.add_argument("--debug", action="store_true")

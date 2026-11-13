@@ -29,6 +29,9 @@ pub(crate) const CHAT_PAGE: usize = 8;
 pub(crate) const CHAT_H: f32 = 248.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
+/// 语音唤醒时的长条胶囊：比收起药丸长，和通知卡差不多长度。
+pub(crate) const VOICE_W: f32 = 300.0;
+pub(crate) const VOICE_H: f32 = 44.0;
 pub(crate) const HUD_W: f32 = 260.0;
 pub(crate) const LYRIC_BAR_W: f32 = 300.0;
 pub(crate) const HUD_TRACK_X: f32 = 48.0;
@@ -747,6 +750,9 @@ pub struct App {
     /// 语音唤醒子进程（开开关时才有）与它最近的状态。
     pub(crate) voice: Option<crate::voice::Service>,
     pub(crate) voice_status: crate::voice::Status,
+    /// 语音唤醒后的胶囊阶段：听你说话 / 等模型回答；回答完成自动展开对话页。
+    pub(crate) voice_phase: Option<crate::voice::Phase>,
+    pub(crate) voice_phase_until: f64,
     /// 语音环境：手工指定的 Python / 模型目录 / 设备。
     pub(crate) voice_config: crate::voice::Config,
     /// 设置页里正在跑的「下载模型 / 安装依赖」任务。
@@ -863,6 +869,8 @@ impl App {
             chat: crate::chat_ui::State::load(),
             voice: None,
             voice_status: Default::default(),
+            voice_phase: None,
+            voice_phase_until: 0.0,
             voice_config: crate::voice::Config::load(),
             voice_setup: None,
             voice_log: Vec::new(),
@@ -1511,6 +1519,10 @@ impl App {
         if !self.compact_notices()&&!self.open {
             if let Some(a)=&self.notice {let (width,height)=self.notice_size(a);return (width+self.pet_space(),height);}
         }
+        // 唤醒后先变长条胶囊，不展开整块面板；通知卡优先于它，避免盖住会议提醒。
+        if !self.open && !self.side() && self.voice_phase.is_some() {
+            return (VOICE_W, VOICE_H);
+        }
         if self.side() {
             // 左右停靠：竖向胶囊（通知仍是贴边滑出的横向卡片，见上）。
             return self.side_base_size(self.effective_minimal()&&self.t>=self.notification_bell_until&&(self.browser_minimal_active||self.pending_messengers.is_empty()));
@@ -1780,6 +1792,7 @@ impl App {
         self.cursor_local = env.cursor.map(|p| base.to_local(p));
 
         let banner=!self.compact_notices()&&self.notice.is_some()&&!self.open;
+        let voice_capsule=!self.open && !self.side() && self.voice_phase.is_some() && !banner;
         let restoring_lyrics=!self.open&&self.notice.is_none()&&self.island_lyrics_active()&&self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()||a.source!=crate::extras::AlertSource::Internal);
         let fading_hud=!self.compact_notices()&&!self.open&&self.hud_notice.as_ref().is_some_and(|a|a.is_hud())&&(banner||self.hud_alpha>0.003);
         if fading_hud {
@@ -1795,6 +1808,8 @@ impl App {
             }
         }else if banner {
             if let Some(a)=self.notice.clone(){self.draw_notice(&Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect())),panel,&a,&mut cmds);}
+        }else if voice_capsule {
+            self.draw_voice_capsule(&base,panel,&mut cmds);
         }else if !minimal_pill || pc > 0.0 {
             self.resident_header(&base, panel, cx, if restoring_lyrics{0.0}else{pc}, reveal, env);
         }
@@ -1842,7 +1857,7 @@ impl App {
             if ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!rect.contains(p)&&!notice_rect.is_some_and(|r|r.contains(p)))){self.notice_details=false;}
         }
         let pet_alpha=self.pet_a*(1.0-smoothstep(0.0,0.3,pc));
-        if pet_alpha>0.004 && !minimal_pill {
+        if pet_alpha>0.004 && !minimal_pill && !voice_capsule {
             let y=(h.min(self.base_size().1)-BAR_H).max(0.0)/2.0;
             // 吉祥物跟随皮肤换色：浅色底上变成深色版本，保持清晰。
             let fit=if self.island_lyrics_active()||self.notice.is_some(){1.0}else{((WIN_W-32.0)/self.resident.target.width).min(1.0)};

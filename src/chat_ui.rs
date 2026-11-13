@@ -427,7 +427,12 @@ impl App {
                 self.chat.status = format!("用时 {:.1}s · {chars} 字", ms as f64 / 1000.0);
                 self.chat.status_error = false;
                 self.pet.react(crate::pet::PetState::Happy);
-                if !self.open {
+                // 语音唤醒的这条回答：说完自动展开，让用户直接看到内容。
+                if self.voice_phase == Some(crate::voice::Phase::Thinking) {
+                    self.voice_phase = None;
+                    self.voice_phase_until = 0.0;
+                    self.show_page(CHAT_PAGE);
+                } else if !self.open {
                     let index = self.chat.index();
                     let text = self.chat.conversations[index].messages.last().map(|message| message.display().chars().take(40).collect::<String>()).unwrap_or_default();
                     self.alert("AI 回复已就绪", text, CHAT_PAGE, false);
@@ -445,6 +450,12 @@ impl App {
                 self.chat.status = error;
                 self.chat.status_error = true;
                 self.pet.react(crate::pet::PetState::Worried);
+                // 语音发起的请求失败了也展开，错误原因就在对话页顶部。
+                if self.voice_phase == Some(crate::voice::Phase::Thinking) {
+                    self.voice_phase = None;
+                    self.voice_phase_until = 0.0;
+                    self.show_page(CHAT_PAGE);
+                }
             }
             chat::Event::Test(Ok(ok)) => {
                 self.chat.testing = false;

@@ -15,6 +15,15 @@ use std::sync::mpsc::{Receiver, Sender};
 use eframe::egui;
 
 use crate::app::{App, Cmd, CHAT_PAGE};
+use crate::paint::{Card, H};
+use crate::theme::{self, W};
+
+/// 唤醒后的两个阶段：先听你说话，再把识别结果交给模型。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Listening,
+    Thinking,
+}
 
 /// 别弹黑框（Windows）。
 #[cfg(windows)]
@@ -458,6 +467,10 @@ impl App {
     /// 每帧调用：按开关起停子进程，把识别出的文字送进对话页。
     pub(crate) fn voice_tick(&mut self, ctx: &egui::Context, cmds: &mut Vec<Cmd>) {
         self.voice_setup_tick(ctx);
+        // 唤醒后没等到命令（或回答一直没回来）时，别让长条胶囊一直挂着。
+        if self.voice_phase.is_some() && self.t > self.voice_phase_until {
+            self.voice_phase = None;
+        }
         if std::env::var_os("DAOZAI_VOICE_OFF").is_some() {
             return;
         }
@@ -604,7 +617,7 @@ impl App {
         self.voice_config.resolved_models().is_some_and(|path| has_models(&path))
     }
 
-    fn voice_event(&mut self, event: Event, cmds: &mut Vec<Cmd>) {
+    pub(crate) fn voice_event(&mut self, event: Event, cmds: &mut Vec<Cmd>) {
         match event {
             Event::Ready { device, voiceprint, threshold, speaker } => {
                 let status = &mut self.voice_status;
@@ -621,6 +634,10 @@ impl App {
                 if state == "awake" && self.voice_status.state != "awake" {
                     self.pet.react(crate::pet::PetState::Curious);
                 }
+                // 唤醒后一直没说话，脚本会回到 idle：把长条胶囊收回去。
+                if state == "idle" && self.voice_phase == Some(Phase::Listening) {
+                    self.voice_phase = None;
+                }
                 self.voice_status.state = state;
             }
             Event::Level(level) => self.voice_status.level = level,
@@ -628,10 +645,18 @@ impl App {
                 self.voice_status.last = text;
                 self.voice_status.message.clear();
                 self.pet.react(crate::pet::PetState::Curious);
+                self.voice_phase = Some(Phase::Listening);
+                self.voice_phase_until = self.t + 12.0;
+                // 通知卡会占住收起位置；内部的小提示让位给语音胶囊，会议提醒保留。
+                if self.notice.as_ref().is_some_and(|a| a.meeting.is_none()) {
+                    self.notice = None;
+                }
             }
             Event::Command(text) => {
                 self.voice_status.last = text.clone();
                 self.voice_status.message.clear();
+                self.voice_phase = Some(Phase::Thinking);
+                self.voice_phase_until = self.t + 600.0;
                 self.voice_send(text, cmds);
             }
             Event::Heard { text, note } => {
@@ -686,12 +711,6 @@ impl App {
                     self.voice_retry_at = self.t + 5.0;
                 }
                 self.voice = None;
-                // 子进程意外退出（模型缺失、Python 崩了）时把开关关掉：
-                // 否则下一帧就会再拉一次，变成疯狂重启。
-                if self.settings.voice_wake {
-                    self.settings.voice_wake = false;
-                    self.settings.save();
-                }
             }
         }
     }
@@ -707,11 +726,51 @@ impl App {
             return;
         }
         self.chat.draft = text;
-        if self.settings.visible_pages.get(CHAT_PAGE).copied().unwrap_or(true) && self.page != CHAT_PAGE {
+        self.chat_send(cmds);
+        if self.chat.is_streaming() {
+            self.pet.react(crate::pet::PetState::Thinking);
+        } else {
+            // 没发出去（没配 Key、消息为空）：直接展开，把原因显示在对话页。
+            self.voice_phase = None;
             self.show_page(CHAT_PAGE);
         }
-        self.chat_send(cmds);
-        self.pet.react(crate::pet::PetState::Thinking);
+    }
+
+    /// 唤醒后的长条胶囊：左边麦克风，中间状态与识别到的文字，右边电平条。
+    /// 点一下直接展开对话页。
+    pub(crate) fn draw_voice_capsule(&mut self, base: &Card, panel: egui::Rect, _cmds: &mut Vec<Cmd>) {
+        let c = Card::new(base.ui, panel.min, panel.intersect(base.ui.max_rect()));
+        let (w, h) = (panel.width(), panel.height());
+        if c.hit(0.0, 0.0, w, h, "voice-capsule").clicked() {
+            self.voice_phase = None;
+            self.show_page(CHAT_PAGE);
+            return;
+        }
+        let thinking = self.voice_phase == Some(Phase::Thinking);
+        let accent = if thinking { theme::BLUE } else { theme::SOFT_GREEN };
+        let (mx, my) = (23.0, h * 0.5 - 1.5);
+        c.fill(mx - 2.5, my - 8.0, 5.0, 10.0, 2.5, theme::WHITE);
+        c.arc(mx, my + 1.5, 5.0, 0.35, std::f32::consts::PI - 0.35, 1.2, theme::WHITE);
+        c.seg((mx, my + 6.5), (mx, my + 8.5), 1.2, theme::WHITE);
+        c.seg((mx - 3.0, my + 8.5), (mx + 3.0, my + 8.5), 1.2, theme::WHITE);
+        c.text(40.0, 18.5, if thinking { "正在想…" } else { "在听你说…" }, 12.5, W::Semibold, theme::WHITE, H::Left);
+        let sub = if !self.voice_status.last.is_empty() {
+            self.voice_status.last.clone()
+        } else if thinking {
+            "稍等，马上展开回答".into()
+        } else {
+            "直接说出你的问题".into()
+        };
+        let fitted = c.fit(&sub, 9.5, W::Regular, 188.0);
+        c.text(40.0, 32.5, &fitted, 9.5, W::Regular, theme::GRAY, H::Left);
+        let level = self.voice_status.level.clamp(0.0, 1.0);
+        for i in 0..5 {
+            let wave = (self.t * 7.0 + i as f64 * 0.9).sin().abs() as f32;
+            let amp = if thinking { wave * 0.35 + 0.15 } else { level * 0.7 + wave * 0.3 };
+            let bh = 3.0 + 9.0 * amp;
+            let x = w - 28.0 + i as f32 * 4.5;
+            c.fill(x, h * 0.5 - bh * 0.5, 2.5, bh, 1.2, accent);
+        }
     }
 
     /// 设置页的「录入我的声音」。
