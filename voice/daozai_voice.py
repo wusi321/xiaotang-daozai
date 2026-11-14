@@ -315,7 +315,9 @@ class Speaker:
                 "mean": np.asarray(data["mean"], dtype=np.float32),
                 "each": [np.asarray(e, dtype=np.float32) for e in data["each"]],
             }
-            self.threshold = float(data.get("threshold", 0.45))
+            # 实测 0.55 对 1~2 秒的短句太严，真人复测常落在 0.45~0.55；
+            # 上限压到 0.45（贾维斯也做过同样的 0.40 上限修正）。
+            self.threshold = min(float(data.get("threshold", 0.45)), 0.45)
         except Exception:
             self.profile = None
 
@@ -348,7 +350,7 @@ class Speaker:
             if norm > 0:
                 self_scores.append(float(np.dot(vector, rest / norm)))
         low = min(self_scores) if self_scores else 0.5
-        threshold = float(np.clip(low - 0.10, 0.30, 0.55))
+        threshold = float(np.clip(low - 0.10, 0.30, 0.45))
         self.profile = {"mean": mean, "each": list(enrolled)}
         self.threshold = threshold
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -655,10 +657,11 @@ class Engine:
             self.kws_hit_at = 0.0
             self.kws_retro = None
             self.kws_retro_queue.clear()
-            if not self.voice_ok(samples, "wake"):
+            # 唤醒词片段通常只有 1 秒左右，CAM++ 对这么短的片段打分偏低，
+            # 容易把刚唤醒的会话直接撤回；改为只在有命令要发送时验证声纹。
+            # 跟随窗口里每一句命令仍会单独验证。
+            if command and not self.voice_ok(samples, "command"):
                 self.kws_announced = False
-                if self.args.debug:
-                    self.emit({"t": "heard", "text": text, "note": "声纹不符"})
                 self.retract_kws("声纹不符", quiet=True)
                 return
             self.set_state("awake")
@@ -670,9 +673,18 @@ class Engine:
                 self.deliver(command)
             return
         if self.kws_pending:
-            # KWS 命中了，但这一句没匹配上：可能 VAD 把“你好/岛崽”切开了，也可能是误报。
-            # 保留到 3 秒窗口结束，先不把这句话当命令发出去。
-            if self.debug:
+            # KWS 已经听到关键词，但 ASR 没复述出名字（口音/远场/切句都可能）。
+            # 录过声纹时先把跟随窗口打开，让用户接着说：命令仍会逐句过声纹，
+            # 不会因为一句识别不准就把整个会话撤掉。没录声纹时保守撤回，
+            # 避免电视声被当成命令。
+            if self.speaker.ready():
+                self.kws_pending = False
+                self.kws_announced = False
+                self.set_state("awake")
+                self.awake_until = now + self.follow
+                if self.args.debug:
+                    self.emit({"t": "heard", "text": text, "note": "KWS 已命中，ASR 未复述名字；进入跟随，这句不发送"})
+            elif self.debug:
                 self.emit({"t": "heard", "text": text, "note": "KWS 候选未确认"})
             return
         if not in_follow:
@@ -690,8 +702,11 @@ class Engine:
         verdict = self.speaker.verify(samples[: int(6 * SR)])
         if verdict is None:
             return True
-        if not verdict and self.args.debug:
-            self.emit({"t": "heard", "text": "", "note": f"声纹不符（{why}）"})
+        if not verdict:
+            # 不再静默丢弃：设置页状态行会显示原因，方便判断是声纹太严还是识别错了。
+            self.emit({"t": "warn", "message": f"声纹不符（{why}）：这句话没有发送；可重新录入或忘掉声纹"})
+            if self.args.debug:
+                self.emit({"t": "heard", "text": "", "note": f"声纹不符（{why}）"})
         return verdict
 
     def deliver(self, command: str):
@@ -922,7 +937,7 @@ def main():
     parser.add_argument("--speaker-model", help="CAM++ 声纹模型路径")
     parser.add_argument("--profile", help="声纹文件路径")
     parser.add_argument("--device", type=int, default=None, help="输入设备编号")
-    parser.add_argument("--follow", type=float, default=8.0, help="唤醒后多久内不用再喊唤醒词")
+    parser.add_argument("--follow", type=float, default=15.0, help="唤醒后多久内不用再喊唤醒词")
     parser.add_argument("--preroll", type=float, default=PREROLL, help="每句话前补多少秒，避免句首被 VAD 切掉")
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--loose", action="store_true", help="只说“岛仔”也能唤醒")

@@ -196,7 +196,7 @@ sherpa-onnx-cli text2token \
 idle
   │  KWS 命中（80 ms 帧，160~320 ms）
   ▼
-awake（立刻发 wake；3 s 内等 ASR 确认，确认后按 8 s 跟随窗口）
+awake（立刻发 wake；3 s 内等 ASR 确认，确认后按 15 s 跟随窗口）
   │  VAD 切出这一句 → 只对这一句跑 SenseVoice
   ├─ 文本正则命中 → 声纹通过 → command
   ├─ 文本正则不命中 → 判定 KWS 误报，回 idle（不发送）

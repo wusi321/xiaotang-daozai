@@ -722,7 +722,7 @@ impl App {
                 self.voice_status.message.clear();
                 self.pet.react(crate::pet::PetState::Curious);
                 self.voice_phase = Some(Phase::Listening);
-                self.voice_phase_until = self.t + 12.0;
+                self.voice_phase_until = self.t + 20.0;
                 // 通知卡会占住收起位置；内部的小提示让位给语音胶囊，会议提醒保留。
                 if self.notice.as_ref().is_some_and(|a| a.meeting.is_none()) {
                     self.notice = None;
