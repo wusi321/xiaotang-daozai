@@ -753,6 +753,8 @@ pub struct App {
     /// 语音唤醒后的胶囊阶段：听你说话 / 等模型回答；回答完成自动展开对话页。
     pub(crate) voice_phase: Option<crate::voice::Phase>,
     pub(crate) voice_phase_until: f64,
+    /// 回答期间定期续跟随窗口，避免长回答中途过期。
+    pub(crate) voice_hold_at: f64,
     /// 语音环境：手工指定的 Python / 模型目录 / 设备。
     pub(crate) voice_config: crate::voice::Config,
     /// 设置页里正在跑的「下载模型 / 安装依赖」任务。
@@ -871,6 +873,7 @@ impl App {
             voice_status: Default::default(),
             voice_phase: None,
             voice_phase_until: 0.0,
+            voice_hold_at: 0.0,
             voice_config: crate::voice::Config::load(),
             voice_setup: None,
             voice_log: Vec::new(),

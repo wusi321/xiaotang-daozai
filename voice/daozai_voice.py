@@ -515,6 +515,17 @@ class Engine:
                 self.speaker.load(profile_path(self.args.profile))
                 self.emit({"t": "ready", "voiceprint": self.speaker.ready(),
                            "threshold": round(self.speaker.threshold, 2)})
+            elif cmd == "follow":
+                # 父进程在模型回答期间/回答完成后把跟随窗口续上，这样不用再喊唤醒词。
+                try:
+                    seconds = float(payload.get("seconds", self.follow))
+                except (TypeError, ValueError):
+                    seconds = self.follow
+                self.awake_until = time.time() + max(0.0, seconds)
+                if seconds > 0:
+                    self.set_state("awake")
+                elif self.state == "awake":
+                    self.set_state("idle")
 
     # -- 主循环 -------------------------------------------------------
     def run_mic(self):

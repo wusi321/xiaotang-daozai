@@ -432,6 +432,8 @@ impl App {
                     self.voice_phase = None;
                     self.voice_phase_until = 0.0;
                     self.show_page(CHAT_PAGE);
+                    // 回答可能要几十秒，读完还能直接接着说，不用再喊唤醒词。
+                    self.voice_follow_after_reply();
                 } else if !self.open {
                     let index = self.chat.index();
                     let text = self.chat.conversations[index].messages.last().map(|message| message.display().chars().take(40).collect::<String>()).unwrap_or_default();
@@ -443,6 +445,7 @@ impl App {
                 self.chat.streaming = None;
                 self.chat.status = "已停止生成".into();
                 self.chat.status_error = false;
+                if self.voice_phase.is_some() { self.voice_follow_after_reply(); }
             }
             chat::Event::Error(error) => {
                 self.chat_finish(Outcome::Failed(error.clone()));
@@ -455,6 +458,7 @@ impl App {
                     self.voice_phase = None;
                     self.voice_phase_until = 0.0;
                     self.show_page(CHAT_PAGE);
+                    self.voice_follow_after_reply();
                 }
             }
             chat::Event::Test(Ok(ok)) => {

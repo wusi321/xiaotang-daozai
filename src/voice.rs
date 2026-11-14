@@ -266,6 +266,14 @@ impl Service {
         }
     }
 
+    /// 把跟随窗口续到 `seconds` 秒后：回答期间和回答完成后都能直接接着说，不用再喊唤醒词。
+    pub(crate) fn follow(&mut self, seconds: f32) {
+        if let Some(stdin) = self.stdin.as_mut() {
+            let _ = writeln!(stdin, "{{\"cmd\":\"follow\",\"seconds\":{seconds}}}");
+            let _ = stdin.flush();
+        }
+    }
+
     pub(crate) fn drain(&self, out: &mut Vec<Event>) {
         while let Ok(event) = self.events.try_recv() {
             out.push(event);
@@ -471,6 +479,11 @@ impl App {
         if self.voice_phase.is_some() && self.t > self.voice_phase_until {
             self.voice_phase = None;
         }
+        // 模型回答可能很长：每 20 秒把跟随窗口续到 120 秒，回答期间/回答完都能接着说。
+        if self.chat.is_streaming() && self.voice_phase.is_some() && self.t >= self.voice_hold_at {
+            if let Some(voice) = self.voice.as_mut() { voice.follow(120.0); }
+            self.voice_hold_at = self.t + 20.0;
+        }
         if std::env::var_os("DAOZAI_VOICE_OFF").is_some() {
             return;
         }
@@ -499,10 +512,13 @@ impl App {
             self.voice_event(event, cmds);
         }
 
-        // 上一句还在生成时收到的语音，等它答完再发
+        // 上一句还在生成时收到的语音，等它答完再发；同样按「语音提问」处理，
+        // 这样它的回答完成后也会自动展开、并保留 30 秒跟随窗口。
         if let Some(text) = self.voice_pending.clone() {
             if !self.chat.is_streaming() {
                 self.voice_pending = None;
+                self.voice_phase = Some(Phase::Thinking);
+                self.voice_phase_until = self.t + 600.0;
                 self.voice_send(text, cmds);
             }
         }
@@ -728,11 +744,21 @@ impl App {
         self.chat.draft = text;
         self.chat_send(cmds);
         if self.chat.is_streaming() {
+            // 回答可能要几十秒，期间把跟随窗口续上：说完/回答完都能直接追问。
+            if let Some(voice) = self.voice.as_mut() { voice.follow(120.0); }
+            self.voice_hold_at = self.t + 20.0;
             self.pet.react(crate::pet::PetState::Thinking);
         } else {
             // 没发出去（没配 Key、消息为空）：直接展开，把原因显示在对话页。
             self.voice_phase = None;
             self.show_page(CHAT_PAGE);
+        }
+    }
+
+    /// 回答结束后把跟随窗口留出 30 秒，读完了还能直接接着说。
+    pub(crate) fn voice_follow_after_reply(&mut self) {
+        if let Some(voice) = self.voice.as_mut() {
+            voice.follow(30.0);
         }
     }
 
