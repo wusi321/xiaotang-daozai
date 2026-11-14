@@ -1314,6 +1314,21 @@ impl App {
                         settings_label(ui,"语音");
                         settings_card(ui,|ui|{
                             setting_row(ui,"语音唤醒","喊「你好岛崽」就开始说话；识别在本机完成，录音不出电脑",&mut self.settings.voice_wake);
+                            if self.settings.voice_wake {
+                                ui.separator();
+                                let mut kws = self.settings.voice_kws;
+                                setting_row(ui,"声学唤醒","先用 KWS 听关键词，命中后才跑识别；更省 CPU",&mut kws);
+                                if kws != self.settings.voice_kws {
+                                    self.voice_set_kws(kws);
+                                }
+                                settings_hint(ui, if !self.settings.voice_kws {
+                                    "已切到识别唤醒：每句话都会跑识别，唤醒词支持任意说法，但 CPU 会高一些。"
+                                } else if self.voice_kws_ready() {
+                                    "KWS 模型已就绪：空闲时只跑关键词检测，唤醒后再跑识别。"
+                                } else {
+                                    "还没找到 KWS 模型：会回退到识别唤醒；点下面的「下载语音模型」一起下载（约 31 MB）。"
+                                });
+                            }
                             let status = self.voice_status.describe();
                             settings_hint(ui,&status);
                             let running = self.voice_status.running;
@@ -1342,7 +1357,7 @@ impl App {
                                 if ui.add_enabled(!busy,egui::Button::new("选择模型目录")).clicked() {
                                     self.pending.push(Cmd::VoicePickModels);
                                 }
-                                if ui.add_enabled(!busy,egui::Button::new("下载语音模型")).on_hover_text("约 270 MB，下载到当前模型目录").clicked() {
+                                if ui.add_enabled(!busy,egui::Button::new("下载语音模型")).on_hover_text("约 300 MB（含 KWS），下载到当前模型目录").clicked() {
                                     self.voice_download_models(ui.ctx());
                                 }
                                 if ui.add_enabled(!busy,egui::Button::new("安装语音依赖")).on_hover_text("创建 venv 并安装 sherpa-onnx / numpy / sounddevice").clicked() {

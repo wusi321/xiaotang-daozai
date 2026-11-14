@@ -37,7 +37,7 @@ fn hide_console(_command: &mut Command) {}
 
 /// 子进程吐出来的事件。
 pub(crate) enum Event {
-    Ready { device: String, voiceprint: bool, threshold: f32, speaker: bool },
+    Ready { device: String, voiceprint: bool, threshold: f32, speaker: bool, kws: bool },
     State(String),
     Level(f32),
     Wake(String),
@@ -60,6 +60,8 @@ pub(crate) struct Status {
     pub voiceprint: bool,
     pub speaker: bool,
     pub threshold: f32,
+    /// 当前是否在用 KWS 声学门控（false 表示回退到每句都识别）。
+    pub kws: bool,
     pub last: String,
     pub message: String,
     pub enroll: Option<(u32, u32, String)>,
@@ -76,6 +78,7 @@ impl Default for Status {
             voiceprint: false,
             speaker: true,
             threshold: 0.0,
+            kws: false,
             last: String::new(),
             message: String::new(),
             enroll: None,
@@ -111,8 +114,9 @@ impl Status {
             "还没录声纹，谁喊都认".to_string()
         };
         let device = if self.device.is_empty() { "麦克风".into() } else { self.device.clone() };
+        let engine = if self.kws { "声学唤醒" } else { "识别唤醒" };
         let extra = if self.message.is_empty() { String::new() } else { format!(" · {}", self.message) };
-        format!("{device} · {state} · {voice} · 音量 {:.0}%{extra}", self.level * 100.0)
+        format!("{device} · {state} · {engine} · {voice} · 音量 {:.0}%{extra}", self.level * 100.0)
     }
 }
 
@@ -186,6 +190,46 @@ pub fn has_models(dir: &Path) -> bool {
     sense && vad && speaker
 }
 
+/// 目录里是否有可用的 KWS 模型（encoder / decoder / joiner / tokens）。
+pub(crate) fn has_kws(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false; };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if !path.is_dir() || !name.starts_with("sherpa-onnx-kws") || !path.join("tokens.txt").is_file() {
+            continue;
+        }
+        let has = |prefix: &str| std::fs::read_dir(&path).map(|items| items.flatten().any(|item| {
+            let file = item.file_name().to_string_lossy().to_ascii_lowercase();
+            file.starts_with(prefix) && file.ends_with(".onnx")
+        })).unwrap_or(false);
+        if has("encoder-") && has("decoder-") && has("joiner-") {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_kws() -> Option<PathBuf> {
+    let mut candidates = vec![Config::default_models_dir()];
+    if let Some(path) = std::env::var_os("DAOZAI_VOICE_MODELS") {
+        let path = PathBuf::from(path);
+        if path.is_dir() { candidates.push(path); }
+    }
+    if let Some(path) = std::env::var_os("JARVIS_VOICE_MODELS") {
+        let path = PathBuf::from(path);
+        if path.is_dir() { candidates.push(path); }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join("Jarvis").join("models"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() { candidates.push(dir.join("voice").join("models")); }
+    }
+    candidates.push(PathBuf::from(r"D:\dsh-voice-models"));
+    candidates.into_iter().find(|path| has_kws(path))
+}
+
 fn find_models() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("DAOZAI_VOICE_MODELS") {
         let path = PathBuf::from(path);
@@ -210,7 +254,7 @@ pub(crate) struct Service {
 }
 
 impl Service {
-    pub(crate) fn start(ctx: egui::Context, config: &Config) -> Result<Self, String> {
+    pub(crate) fn start(ctx: egui::Context, config: &Config, kws: bool) -> Result<Self, String> {
         let python = config.resolved_python().ok_or_else(|| {
             "找不到 Python：到 设置 → 常规 → 语音 里选择 Python 或安装语音依赖".to_string()
         })?;
@@ -244,6 +288,8 @@ impl Service {
         if std::env::var_os("DAOZAI_VOICE_LOOSE").is_some() {
             command.arg("--loose");
         }
+        // 显式覆盖父进程环境：设置里的开关优先于系统里的 DAOZAI_VOICE_KWS。
+        command.env("DAOZAI_VOICE_KWS", if kws { "1" } else { "0" });
         hide_console(&mut command);
 
         let mut child = command.spawn().map_err(|error| format!("启动语音子进程失败：{error}"))?;
@@ -356,6 +402,7 @@ fn parse(line: &str) -> Option<Event> {
             voiceprint: bool_of(&value, "voiceprint"),
             threshold: float_of(&value, "threshold"),
             speaker: value.get("speaker").map(|v| v.as_bool().unwrap_or(true)).unwrap_or(true),
+            kws: bool_of(&value, "kws"),
         },
         "state" => Event::State(text_of(&value, "state")),
         "level" => Event::Level(float_of(&value, "rms")),
@@ -490,7 +537,7 @@ impl App {
         if self.settings.voice_wake {
             if self.voice.is_none() && self.t >= self.voice_retry_at {
                 self.voice_status = Status { starting: true, ..Status::default() };
-                match Service::start(ctx.clone(), &self.voice_config) {
+                match Service::start(ctx.clone(), &self.voice_config, self.settings.voice_kws) {
                     Ok(service) => self.voice = Some(service),
                     Err(error) => {
                         self.voice_status = Status { message: error, ..Status::default() };
@@ -590,10 +637,17 @@ impl App {
         self.voice_restart();
     }
 
+    /// 设置页切换「声学唤醒 / 识别唤醒」；重启子进程生效。
+    pub(crate) fn voice_set_kws(&mut self, enabled: bool) {
+        self.settings.voice_kws = enabled;
+        self.settings.save();
+        self.voice_restart();
+    }
+
     /// 设置页「下载语音模型」。
     pub(crate) fn voice_download_models(&mut self, ctx: &egui::Context) {
         if self.voice_setup.is_some() { return; }
-        if self.voice_models_ready() {
+        if self.voice_models_ready() && (!self.settings.voice_kws || self.voice_kws_ready()) {
             self.voice_log = vec!["已经找到可用的语音模型，不用重复下载".into()];
             return;
         }
@@ -625,7 +679,7 @@ impl App {
         let python = self.voice_config.resolved_python().map(|path| path.display().to_string())
             .unwrap_or_else(|| "未找到（可安装语音依赖或选择 python.exe）".into());
         let models = self.voice_config.resolved_models().map(|path| path.display().to_string())
-            .unwrap_or_else(|| "未找到（可下载约 270 MB 模型）".into());
+            .unwrap_or_else(|| "未找到（可下载约 300 MB 模型）".into());
         (python, models)
     }
 
@@ -633,9 +687,14 @@ impl App {
         self.voice_config.resolved_models().is_some_and(|path| has_models(&path))
     }
 
+    /// KWS 模型是否就绪；和 Python 侧一样会搜索几个候选目录。
+    pub(crate) fn voice_kws_ready(&self) -> bool {
+        self.voice_config.resolved_models().is_some_and(|path| has_kws(&path)) || find_kws().is_some()
+    }
+
     pub(crate) fn voice_event(&mut self, event: Event, cmds: &mut Vec<Cmd>) {
         match event {
-            Event::Ready { device, voiceprint, threshold, speaker } => {
+            Event::Ready { device, voiceprint, threshold, speaker, kws } => {
                 let status = &mut self.voice_status;
                 status.starting = false;
                 status.running = true;
@@ -644,6 +703,7 @@ impl App {
                 status.voiceprint = voiceprint;
                 status.threshold = threshold;
                 status.speaker = speaker;
+                status.kws = kws;
                 status.message.clear();
             }
             Event::State(state) => {
@@ -838,7 +898,7 @@ mod tests {
     fn helper_events_parse_into_what_the_ui_needs() {
         let ready = parse(r#"{"t":"ready","asr":true,"speaker":true,"voiceprint":false,"device":"阵列麦克风"}"#);
         match ready {
-            Some(Event::Ready { device, voiceprint, threshold, speaker }) => {
+            Some(Event::Ready { device, voiceprint, threshold, speaker, .. }) => {
                 assert_eq!(device, "阵列麦克风");
                 assert!(!voiceprint);
                 assert_eq!(threshold, 0.0);
@@ -893,7 +953,7 @@ mod tests {
     #[test]
     #[ignore = "需要本机 Python 与语音模型"]
     fn spawns_the_helper_and_reads_its_ready_event() {
-        let mut service = Service::start(egui::Context::default(), &Config::default()).expect("启动语音子进程");
+        let service = Service::start(egui::Context::default(), &Config::default(), true).expect("启动语音子进程");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         let mut ready = false;
         while !ready && std::time::Instant::now() < deadline {

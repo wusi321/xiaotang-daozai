@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "0.6.77"
+version = "0.6.78"
 edition = "2021"
 license = "MIT"
 description = "岛仔：Windows 顶部的桌面伙伴与信息岛"
@@ -39,6 +39,8 @@ serde_json = "1"
 base64 = "0.22"
 flate2 = "1"
 zstd = { version = "0.13.3", default-features = false }
+bzip2 = "0.4"
+tar = "0.4"
 ring = "0.17"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 raw-window-handle = "0.6"

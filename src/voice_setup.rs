@@ -36,8 +36,24 @@ pub const MODEL_FILES: [(&str, &str, u64); 4] = [
     ),
 ];
 
+/// KWS 模型以 tar.bz2 发布；这里只解出运行时需要的 4 个文件。
+/// 国内直连 GitHub release 经常只有几十 KB/s，所以先用 ghproxy 镜像，失败再直连。
+const KWS_DIR: &str = "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20";
+const KWS_ARCHIVE: (&str, u64) = (
+    "https://ghproxy.net/https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2",
+    32_885_699,
+);
+const KWS_FILES: [&str; 4] = [
+    "encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx",
+    "decoder-epoch-13-avg-2-chunk-8-left-64.onnx",
+    "joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx",
+    "tokens.txt",
+];
+
 /// 模型总数与总大小，设置页用来提示。
-pub fn model_total_bytes() -> u64 { MODEL_FILES.iter().map(|(_, _, size)| *size).sum() }
+pub fn model_total_bytes() -> u64 {
+    MODEL_FILES.iter().map(|(_, _, size)| *size).sum::<u64>() + KWS_ARCHIVE.1
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind { Models, Env }
@@ -118,6 +134,8 @@ fn alternate_source(url: &str) -> Option<String> {
         Some(format!("https://huggingface.co/{rest}"))
     } else if let Some(rest) = url.strip_prefix("https://huggingface.co/") {
         Some(format!("https://hf-mirror.com/{rest}"))
+    } else if url.starts_with("https://github.com/") {
+        Some(format!("https://ghproxy.net/{url}"))
     } else {
         None
     }
@@ -155,8 +173,67 @@ fn download_all(dir: &Path, cancel: &AtomicBool, tx: &mpsc::Sender<Event>, ctx: 
         let _ = std::fs::remove_file(&destination);
         std::fs::rename(&temporary, &destination).map_err(|error| format!("保存文件失败：{error}"))?;
     }
+    if !kws_ready(dir) {
+        download_kws(&agent, dir, cancel, tx, ctx)?;
+    }
     let _ = tx.send(Event::Log("模型下载完成".into()));
     Ok(())
+}
+
+fn kws_ready(dir: &Path) -> bool {
+    let target = dir.join(KWS_DIR);
+    KWS_FILES.iter().all(|name| target.join(name).is_file())
+}
+
+fn download_kws(
+    agent: &ureq::Agent, dir: &Path, cancel: &AtomicBool,
+    tx: &mpsc::Sender<Event>, ctx: &egui::Context,
+) -> Result<(), String> {
+    let target = dir.join(KWS_DIR);
+    std::fs::create_dir_all(&target).map_err(|error| format!("无法创建目录：{error}"))?;
+    let temporary = dir.join(".kws.tar.bz2.part");
+    let _ = tx.send(Event::Log("下载 KWS 模型（约 31 MB，只保留 int8/chunk-8 运行时文件）…".into()));
+    let mut result = download_one(
+        agent, KWS_ARCHIVE.0, &temporary, KWS_ARCHIVE.1,
+        "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2", cancel, tx, ctx,
+    );
+    if result.is_err() {
+        let alternate = KWS_ARCHIVE.0.strip_prefix("https://ghproxy.net/").unwrap_or(KWS_ARCHIVE.0);
+        let _ = tx.send(Event::Log(format!("换一个下载源：{alternate}")));
+        result = download_one(
+            agent, alternate, &temporary, KWS_ARCHIVE.1,
+            "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2", cancel, tx, ctx,
+        );
+    }
+    if let Err(error) = result {
+        // 保留 .part：下次点「下载」会从断点续传，而不是从 0 开始。
+        return Err(error);
+    }
+
+    let unpacked = extract_kws(&temporary, &target)?;
+    let _ = std::fs::remove_file(&temporary);
+    if unpacked < KWS_FILES.len() {
+        return Err(format!("KWS 压缩包不完整：只解出 {unpacked}/{} 个文件", KWS_FILES.len()));
+    }
+    let _ = tx.send(Event::Log("KWS 模型已就绪".into()));
+    Ok(())
+}
+
+fn extract_kws(archive: &Path, target: &Path) -> Result<usize, String> {
+    let file = std::fs::File::open(archive).map_err(|error| format!("打不开下载文件：{error}"))?;
+    let decoder = bzip2::read::BzDecoder::new(BufReader::new(file));
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive.entries().map_err(|error| format!("读取 KWS 压缩包失败：{error}"))?;
+    let mut unpacked = 0usize;
+    for entry in entries {
+        let mut entry = entry.map_err(|error| format!("读取 KWS 压缩包失败：{error}"))?;
+        let path = entry.path().map_err(|error| format!("读取 KWS 文件名失败：{error}"))?;
+        let Some(name) = path.file_name().and_then(|name| name.to_str()).map(str::to_owned) else { continue; };
+        if !KWS_FILES.contains(&name.as_str()) { continue; }
+        entry.unpack(target.join(&name)).map_err(|error| format!("解压 {name} 失败：{error}"))?;
+        unpacked += 1;
+    }
+    Ok(unpacked)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -305,5 +382,38 @@ mod tests {
             assert!(url.starts_with("https://"), "{name} 的下载地址必须是 https");
             assert!(!name.contains('\\'), "清单里统一用 / 分隔");
         }
+        assert!(KWS_ARCHIVE.0.starts_with("https://"));
+        assert!(KWS_FILES.iter().all(|name| name.ends_with(".onnx") || *name == "tokens.txt"));
+    }
+
+    #[test]
+    fn kws_archive_extracts_only_runtime_files() {
+        let root = std::env::temp_dir().join(format!("daozai-kws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let archive = root.join("kws.tar.bz2");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let encoder = bzip2::write::BzEncoder::new(file, bzip2::Compression::best());
+            let mut builder = tar::Builder::new(encoder);
+            for name in KWS_FILES.iter().copied().chain(["extra.txt"]) {
+                let data = b"dummy";
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append_data(&mut header, format!("{KWS_DIR}/{name}"), &data[..]).unwrap();
+            }
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+        let target = root.join("out");
+        std::fs::create_dir_all(&target).unwrap();
+        let count = extract_kws(&archive, &target).unwrap();
+        assert_eq!(count, KWS_FILES.len());
+        for name in KWS_FILES {
+            assert!(target.join(name).is_file(), "missing {name}");
+        }
+        assert!(!target.join("extra.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

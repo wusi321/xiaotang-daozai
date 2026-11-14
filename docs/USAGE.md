@@ -70,9 +70,9 @@ Grok Bot、Gemini 提供各自的连接入口；会话过期时重新连接。�
 
 第一次用先点「录入我的声音」，照着提示读三句话；录完之后只认这个声音，别人的声音、视频里的人声都会被忽略。想换人或取消限制，点「忘掉我的声音」即可。
 
-同一张设置卡里还有环境区：上面两行显示当前的 Python 和模型目录，找得到会显示「已就绪」。没有的话可以点「下载语音模型」（约 270 MB，支持断点续传）和「安装语音依赖」（在 `%LOCALAPPDATA%\Daozai\voice\venv` 里装 sherpa-onnx / numpy / sounddevice），进度与日志直接显示在设置里；也可以用「选择 Python」「选择模型目录」手动指定。装过贾维斯的话会自动优先用它的 venv 和 `%LOCALAPPDATA%\Jarvis\models`，不必重复下载。
+同一张设置卡里还有环境区：上面两行显示当前的 Python 和模型目录，找得到会显示「已就绪」。没有的话可以点「下载语音模型」（约 300 MB，含 KWS，支持断点续传）和「安装语音依赖」（在 `%LOCALAPPDATA%\Daozai\voice\venv` 里装 sherpa-onnx / numpy / sounddevice），进度与日志直接显示在设置里；也可以用「选择 Python」「选择模型目录」手动指定。装过贾维斯的话会自动优先用它的 venv 和 `%LOCALAPPDATA%\Jarvis\models`，不必重复下载。
 
-识别、唤醒词和声纹都在本机跑（sherpa-onnx + SenseVoice + CAM++），录音不出电脑，也不联网；只有识别出的文字会交给模型。跑起来需要本机 Python 和这几个模型，默认会自动找 `%LOCALAPPDATA%\Jarvis\models`（装过贾维斯就有）；细节和换模型的方法见 [VOICE-WAKE.md](VOICE-WAKE.md)。
+识别、唤醒词和声纹都在本机跑（sherpa-onnx KWS + SenseVoice + CAM++），录音不出电脑，也不联网；只有识别出的文字会交给模型。设置里的「声学唤醒」默认开启：先由 KWS 听关键词，命中后才跑识别，空闲 CPU 更低；关掉则回到每句都识别的兼容模式。跑起来需要本机 Python 和这几个模型，默认会自动找 `%LOCALAPPDATA%\Jarvis\models`（装过贾维斯就有）；细节和换模型的方法见 [VOICE-WAKE.md](VOICE-WAKE.md)。
 
 ## 更新、卸载与数据目录
 

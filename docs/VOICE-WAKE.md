@@ -8,11 +8,13 @@
 ```
 麦克风 16 kHz
    │
-   ├─ silero VAD 切句（静音 0.35 s 收尾，一句最长 12 s）
+   ├─ sherpa-onnx KWS 每 80 ms 喂一帧（「你好岛崽 / 嗨岛崽 / 哈喽岛崽 / HELLO 岛崽」）
+   │     └─ 没命中：不跑识别，只花关键词检测的 CPU
    │
-   ├─ SenseVoice 识别（中英日韩粤，自动语种）
+   ├─ 命中后开 3 s 确认窗口：只对这一句跑 silero VAD + SenseVoice
    │
-   ├─ 唤醒词判断：句首「你好 / 嗨 / 哈喽 / hello / hi …」+「岛崽」（含「岛仔 / 导仔 / 刀仔」这类同音误识）
+   ├─ 文本复核：句首「你好 / 嗨 / 哈喽 / hello / hi …」+「岛崽」
+   │     （含「岛仔 / 导仔 / 刀仔」这类同音误识；KWS 命中时名字后面就是命令）
    │     └─ 唤醒后 8 s 内的话不再需要唤醒词（跟随窗口）
    │
    ├─ 声纹判断：CAM++ 192 维向量与录入的声纹比对，低于阈值的声音直接丢掉
@@ -20,11 +22,11 @@
    └─ {"t":"command","text":"…"} → 岛仔填进对话输入框并发送
 ```
 
-唤醒词**不是**单独的声学模型，而是「识别出的文字 + 正则」。这样做的好处是唤醒词可以
-随便改（改成「你好小唐」只是改一行正则），也不依赖预先训练好的关键词模型；代价是每句
-话都要跑一次识别，空闲时 CPU 常驻约 3~8%（2 线程，看机器）。
+默认是**两级**：KWS 声学模型只负责「可能喊了」，SenseVoice 的文本 + 正则 + 声纹负责
+「喊的是什么、是不是你」。这样唤醒词仍然可以改（改 `keywords.txt`，用拼音/phone 写），
+但不再需要每句话都跑 SenseVoice。设置页可以切回「识别唤醒」兼容模式，回到以前的行为。
 
-逐帧处理、状态机（`idle / awake`）、跟随窗口、声纹录入的细节都在
+逐帧处理、状态机（`idle / awake`）、KWS 补确认、跟随窗口、声纹录入的细节都在
 `voice/daozai_voice.py`；Rust 侧 `src/voice.rs` 只负责起停子进程、读 JSON 事件、
 把文字接到对话页。
 
@@ -55,7 +57,8 @@ VAD 报出的句子起点常常晚几十毫秒，第一声「你」容易被切�
 - 把 `--preroll` 调到 0.8（编辑 `%APPDATA%\Daozai\voice\daozai_voice.py` 或加启动参数）；
 - 用 `DAOZAI_VOICE_DEBUG=1` 看识别文本，确认是「没听见」还是「听见了但没匹配上」；
 - 换更近的麦克风或降低环境噪声；
-- 真正要明显提升，还是加一层 KWS 声学唤醒（见文末）。
+- KWS 已经默认开启；如果某个说法总叫不醒，把它按拼音加进
+  `%APPDATA%\Daozai\voice\keywords.txt`（见文末）。
 
 ## 进程与协议
 
@@ -64,8 +67,8 @@ VAD 报出的句子起点常常晚几十毫秒，第一声「你」容易被切�
 
 | 方向 | 内容 |
 | --- | --- |
-| 岛仔 → 子进程 | `{"cmd":"enroll"}` / `{"cmd":"cancel-enroll"}` / `{"cmd":"reload"}` / `{"cmd":"quit"}` |
-| 子进程 → 岛仔 | `ready` / `state` / `level` / `wake` / `command` / `enroll` / `warn` / `error` |
+| 岛仔 → 子进程 | `{"cmd":"enroll"}` / `{"cmd":"cancel-enroll"}` / `{"cmd":"reload"}` / `{"cmd":"quit"}` / `{"cmd":"follow","seconds":N}` |
+| 子进程 → 岛仔 | `ready`（带 `kws` 布尔值）/ `state` / `level` / `wake` / `command` / `enroll` / `warn` / `error` |
 
 子进程的 stderr 写到 `%APPDATA%\Daozai\voice\helper.log`，出问题时先看它。
 
@@ -75,6 +78,7 @@ VAD 报出的句子起点常常晚几十毫秒，第一声「你」容易被切�
 | --- | --- |
 | Python 3.10+ | 带 `sherpa-onnx`、`numpy`、`sounddevice`。装过贾维斯的话直接用它的 `venv` |
 | SenseVoice 模型 | `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-*`（约 230 MB） |
+| KWS 模型 | `sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`（int8 运行时约 5.5 MB；下载包约 31 MB） |
 | silero VAD | `silero_vad.onnx`（约 0.6 MB） |
 | CAM++ 声纹 | `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`（约 27 MB） |
 
@@ -90,6 +94,9 @@ VAD 报出的句子起点常常晚几十毫秒，第一声「你」容易被切�
 4. 脚本旁边的 `models`（通常是 `%APPDATA%\Daozai\voice\models`）
 5. `D:\dsh-voice-models`
 
+即使指定了 `DAOZAI_VOICE_MODELS`，脚本也会继续搜索后面的目录：比如 SenseVoice 在贾维斯
+目录、KWS 在 `D:\dsh-voice-models`，两边都能找到。
+
 Python 解释器按 `DAOZAI_VOICE_PYTHON` → 贾维斯的 venv → `pythonw.exe` / `python.exe`
 的顺序找。声纹存在 `%APPDATA%\Daozai\voice\voiceprint.json`，删掉它等于没录过。
 
@@ -104,8 +111,35 @@ Python 解释器按 `DAOZAI_VOICE_PYTHON` → 贾维斯的 venv → `pythonw.exe
 | `DAOZAI_VOICE_MODELS` | 指定模型目录 |
 | `DAOZAI_VOICE_DEVICE` | 输入设备编号（`python daozai_voice.py --devices` 可以列出来） |
 | `DAOZAI_VOICE_LOOSE=1` | 只说「岛崽」也能唤醒（默认要求带问候语） |
+| `DAOZAI_VOICE_KWS=0` | 关掉 KWS 门控，回到每句都识别的兼容模式（等同于设置里关掉「声学唤醒」） |
+| `DAOZAI_VOICE_KWS_THRESHOLD` | KWS 触发阈值，默认 0.25；误唤醒多就调到 0.3~0.4 |
+| `DAOZAI_VOICE_KWS_SCORE` | KWS 关键词加权，默认 1.0；一般不用改 |
 | `DAOZAI_VOICE_DEBUG=1` | 把每句识别结果也发到界面上，调唤醒词时用 |
 | `DAOZAI_VOICE_OFF=1` | 完全关掉语音（排查用） |
+
+### 声学唤醒与关键词
+
+设置 → 语音 → **声学唤醒** 控制是否用 KWS 门控（默认开）。关掉后回到「每句都跑识别」，
+唤醒词支持任意说法，但空闲 CPU 会回到 3~8%。
+
+关键词在 `%APPDATA%\Daozai\voice\keywords.txt`（`--loose` 时用 `keywords-loose.txt`），
+一行一个，格式是「模型 tokens + `@` 原始词」：
+
+```
+n ǐ h ǎo d ǎo z ǎi @你好岛崽
+h āi d ǎo z ǎi @嗨岛崽
+h ā l óu d ǎo z ǎi @哈喽岛崽
+HH AH0 L OW1 d ǎo z ǎi @HELLO岛崽
+```
+
+- 改词就是用模型 tokens 的拼音/phone 重新拼一行；旧 WenetSpeech 模型没有 `en.phone`，
+  不能写 `HH ...`，脚本会自动跳过不认识的行。
+- 脚本启动时会把合法行写到同目录的 `keywords.valid.txt` 再用；如果所有行都不合法，
+  会打印警告并回退到识别唤醒。
+- 默认不要放裸 `岛崽`；实测「导仔这个名字…」会误触发。确实想只说名字，用
+  `DAOZAI_VOICE_LOOSE=1` 或加 `keywords-loose.txt`。
+- 单独试跑时可以调 `--kws-threshold`（默认 0.25，误唤醒多就调到 0.3~0.4）和
+  `--kws-score`（默认 1.0）；设置页暂不暴露这两个数。
 
 跟随窗口、静音时长等常量在 `voice/daozai_voice.py` 顶部（`MIN_SILENCE`、`MAX_SPEECH`、
 `ENROLL_LINES`），命令行参数 `--follow` 改跟随窗口。
@@ -119,8 +153,9 @@ set DAOZAI_VOICE_PYTHON=%LOCALAPPDATA%\Jarvis\venv\Scripts\python.exe
 %DAOZAI_VOICE_PYTHON% voice\daozai_voice.py --debug
 ```
 
-对着麦克风说「你好岛崽，今天天气怎么样」，应该先看到 `{"t":"wake"}` 再看到
-`{"t":"command"}`。想用现成音频测，加 `--wav 某段16k单声道.wav`。
+对着麦克风说「你好岛崽，今天天气怎么样」，应该先看到 `{"t":"wake","source":"kws"}` 再看到
+`{"t":"command"}`。想用现成音频测，加 `--wav 某段16k单声道.wav`；想对比旧行为，加
+`--no-kws`。
 
 ## 常见问题
 
@@ -128,8 +163,13 @@ set DAOZAI_VOICE_PYTHON=%LOCALAPPDATA%\Jarvis\venv\Scripts\python.exe
 隐私设置里没给桌面程序麦克风权限（设置 → 隐私 → 麦克风 → 允许桌面应用）。用
 `python daozai_voice.py --devices` 换个设备编号试试。
 
-**喊了没反应**：先开 `DAOZAI_VOICE_DEBUG=1`，看识别出来的到底是什么。中文「岛崽」常被
-识别成「岛仔 / 导仔 / 刀仔」，脚本里的正则都收了；如果听到的是别的写法，往 `_NAME` 里加。
+**喊了没反应**：先开 `DAOZAI_VOICE_DEBUG=1`，看有没有 `wake` 和 `heard`。如果连
+`wake` 都没有，是 KWS 没听到：确认 `keywords.txt` 里有这个说法、模型目录里有 KWS，
+或者临时切到「识别唤醒」对比。如果 `wake` 有了但没 `command`，是文本复核没过：
+中文「岛崽」常被识别成「岛仔 / 导仔 / 刀仔」，脚本里的正则都收了；别的写法往 `_NAME` 里加。
+
+**KWS 总误唤醒**：先把裸「岛崽」从 `keywords.txt` 去掉；再把 `--kws-threshold` 从
+0.25 调到 0.3~0.4；最后确认声纹已经录入。
 
 **总是被别人的声音唤醒**：还没录入声纹，或者阈值太松。重新录一次（三句话尽量用平常的
 音量和距离），或把 `voiceprint.json` 里的 `threshold` 调高 0.05。
@@ -146,30 +186,22 @@ set DAOZAI_VOICE_PYTHON=%LOCALAPPDATA%\Jarvis\venv\Scripts\python.exe
 - **依赖源顺序**：清华 → 阿里云 → PyPI，任一成功即停。
 - **模型**：优先复用 `%LOCALAPPDATA%\Jarvis\models`；没有时才下载到
   `%LOCALAPPDATA%\Daozai\voice\models`，先 hf-mirror、失败换 huggingface，支持 `.part` 断点续传。
+  KWS 模型从 ghproxy 镜像下 31 MB 的 tar.bz2（失败再直连 GitHub），只解出 int8/chunk-8
+  的运行时文件（约 5.5 MB）。
 - 选择和下载结果保存在 `%APPDATA%\Daozai\voice\config.json`，改完会自动重启语音子进程。
 
-## 如果要做 KWS（声学唤醒）
+## KWS 门控（已实现）
 
-现在每句话都要跑 SenseVoice，空闲 CPU 约 3~8%、唤醒延迟约 1 秒。想更省电、更快，可以加一层
-关键词检测，让 ASR 只在命中后才跑：
+2026-11 已实现：默认先用 sherpa-onnx KWS 听关键词，命中后才跑 SenseVoice；没命中不跑
+识别。完整的调研、路线对比和自训方案见 [KWS-PLAN.md](KWS-PLAN.md)。
 
-**推荐：sherpa-onnx KWS + 现有 ASR 复核**
-
-1. 模型用 `sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01`（中文，约 3 MB）或英文版；
-   比 SenseVoice 小两个数量级。
-2. 关键词写在 `keywords.txt` 里，用模型 tokens 的拼音/音素表示（例如「你好岛崽」拆成
-   `n ǐ h ǎo d ǎo z ǎi`，不同版本 token 集略有差异）。
-3. 每 80 ms 喂一帧，`is_ready` → `decode_stream` → `get_result`；命中先发 `{"t":"wake"}`，
-   再开 3~5 s 的 VAD 窗口收命令，只对这一句跑 ASR。
-4. 命中后仍用现在这套文本正则 + 声纹复核，压误唤醒；KWS 只负责「可能喊了」。
-5. 调参：`keywords-score`、`keywords-threshold`、`num-trailing-blanks`；用 50 条正样本
-   （不同距离/音量）和 50 条负样本（电视、闲聊）测误唤醒与漏唤醒。
-
-**其它路线**
-
-- **openWakeWord 自训练**：像贾维斯的「hey jarvis」，用 TTS 合成 + 真实录音训练；英文生态成熟，
-  中文需要自己造数据和训练。
-- **Porcupine（Picovoice）**：中文自定义词、接入快、CPU 低；需要 AccessKey，许可证与开源分发要确认。
-- **自训 BC-ResNet / zipformer KWS**：效果最好、可控性最强，但要做数据、训练和导出 ONNX，工作量最大。
-
-建议先上 sherpa KWS 做门控，保留 ASR 复核和声纹；模型与关键词都放本机，沿用设置页的下载与配置方式。
+- 模型：`sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`（中英混合，chunk 8 延迟约
+  160 ms，int8 运行时约 5.5 MB），支持「你好岛崽 / 嗨岛崽 / 哈喽岛崽 / HELLO 岛崽」。
+  旧 WenetSpeech 3.3M 模型只有中文拼音，不能写 `HH ...` 这种英文 phone。
+- 每 80 ms 喂帧，命中立刻发 `wake`；VAD 如果刚好在命中前把这一句切走，脚本会把最近
+  跳过的一段拿回来补一次识别（`KWS 补确认`）。
+- 命中后仍用文本正则 + 声纹复核；KWS 只负责「可能喊了」。ASR 只在命中窗口/跟随窗口里跑。
+- 本机实测：KWS 连续跑约 3.5% 单核（16 线程机器上约 0.2% 总 CPU），唤醒延迟
+  160~320 ms；比每句都跑 SenseVoice 省得多。
+- 如果 KWS 在你的环境仍不够，再考虑自训 BC-ResNet/TCN；openWakeWord 官方只支持英文，
+  不建议直接用于中文。
